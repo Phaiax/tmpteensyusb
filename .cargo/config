@@ -1,0 +1,11 @@
+
+[build]
+target = "thumbv7em-none-eabi"
+
+[target.thumbv7em-none-eabi]
+linker = "arm-none-eabi-gcc"
+ar = "arm-none-eabi-ar"
+rustflags = [
+    "-C",
+    "link-arg=-Tlayout.ld",
+]

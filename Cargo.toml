@@ -1,0 +1,20 @@
+[package]
+name = "teensytest"
+version = "0.1.0"
+authors = ["Phaiax <phaiax-git@invisibletower.de>"]
+build = "build.rs"
+
+[features]
+default = ["board_teensy31", "zinc/loglib"]
+board_teensy31 = ["mcu_k20"] # also enables the mcu_k20 feature in the zinc crate
+#mcu_k20 = ["zinc/mcu_k20", "platformtree/mcu_k20"] # also enables the mcu_k20 feature in the zinc crate
+mcu_k20 = ["zinc/mcu_k20", "platformtreeb/mcu_k20"] # also enables the mcu_k20 feature in the zinc crate
+
+[dependencies]
+zinc = { path =  "../zinc" }
+
+[build-dependencies]
+platformtreeb = { path =  "../zinc/platformtreeb" }
+
+[profile.release]
+panic="abort"
