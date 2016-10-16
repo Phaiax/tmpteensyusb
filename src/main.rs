@@ -4,8 +4,9 @@
 #[macro_use]
 pub extern crate zinc;
 
-mod generated;
-mod usbmem;
+pub mod generated;
+#[macro_use]
+pub mod usbmem;
 // mod test;
 
 
@@ -56,6 +57,7 @@ pub fn main() {
   info!("STARTING UP");
   wait(500);
 
+  test_fifo_2();
   test_fifo();
 
   loop {
@@ -67,36 +69,94 @@ pub fn main() {
 
 }
 
-use usbmem::{Fifos, UsbPacket};
+use usbmem::{Fifos, Ep};
+use core::mem::drop;
+
+fn test_fifo_2() {
+
+ {
+  let pool = fifos!(0, packetbufsize: 0);
+  info!("Pool is {} bytes", core::mem::size_of_val(&pool));
+ }
+
+  // Create static pool. Must not be dropped as long as usb is active. Max 32 elements.
+  let pool = fifos!(); // Defaults to fifos!(32, packetbufsize: 64)
+  // let pool = fifos!(10); // Changes the memory pool size from 32 to 10 packets
+  let pool = fifos!(10, packetbufsize: 30); // Changes the buf size of a packet to 30 bytes.
+
+  // Enqueue into FIFO. Use endpoint 3
+
+  // max 1 helper for each endpoint at a time
+  let mut enq_helper_ep3 = pool.for_enqueuing(Ep::Tx3).unwrap();
+  {
+    let mut packet1 = enq_helper_ep3.enqueue().unwrap(); // allocate
+    packet1.len = 1;
+    packet1.buf[0] = b'a'; // buf is uninitialized! Buf defaults to 64 bytes.
+    // The DROP does the enqueue
+  }
+  // enq_helper_ep3 can be reused as many times as needed.
+
+
+  // Dequeue from FIFO. Use endpoint 3
+
+  // max 1 helper for each endpoint at a time
+  let mut deq_helper_ep3 = pool.for_dequeuing(Ep::Tx3).unwrap();
+  {
+    let packet1 = deq_helper_ep3.dequeue().unwrap(); // dequeue
+    info!("Got {} bytes", packet1.len);
+    work(packet1.buf()); // packet1.buf[packet1.len..] is uninitialized!
+    // The DROP does the deallocate
+  }
+  // deq_helper_ep3 can be reused as many times as needed.
+
+  fn work(data : &[u8]) {}
+
+
+}
 
 fn test_fifo() {
-  let f = Fifos::<[UsbPacket; 32]>::new();
+  let f = fifos!(32);
 
-  let mut enq1 = f.for_enqueuing(1);
+  let mut enq1 = f.for_enqueuing(Ep::Tx1).expect("Cant get enqueuer for EP 1");
+  let mut deq1 = f.for_dequeuing(Ep::Tx1).expect("Cant get dequeuer for EP 1");
+  enq1.enqueue().map(|mut packet| {packet.as_mut().len = 2; });
+  deq1.dequeue().map(|packet| { packet.as_ref().len });
+  assert!(deq1.dequeue().is_none(), "Can dequeue from empty queue.");
 
-  if enq1.is_some() {
-    info!("enq1 is some");
+  // fill
+  for i in 0..16 {
+    enq1.enqueue().expect("Cant fill 16 Elements to EP1").as_mut().len = i;
   }
 
-//  let mut deq1 = f.for_dequeuing(1);
-//
-//  if deq1.is_some() {
-//    info!("deq1 is some");
-//  }
 
+  assert!(f.for_enqueuing(Ep::Tx1).is_none(), "Can create two enqueuers for the same EP");
+  drop(enq1);
+  let mut enq1 = f.for_enqueuing(Ep::Tx1).expect("Cant get enqueuer for EP1 a second time");
+  let mut enq2 = f.for_enqueuing(Ep::Rx15).expect("Cant get enqueuer for EP1 a second time");
 
-  {
-    info!("A");
-//    wait(1000);
-//    let mut packet = enq1.enqueue();//.unwrap();
-    //packet.as_mut().len = 2;
+  // fill more
+  for i in 16..30 {
+    enq1.enqueue().expect("Cant fill 16..30 Elements to EP1").as_mut().len = i;
   }
-//
-//  {
-//    let packet = deq1.dequeue().unwrap();
-//    info!("{}", packet.as_ref().len);
-//  }
+  enq2.enqueue().expect("Cant fill nr 31 to EP15").as_mut().len = 30;
+  enq2.enqueue().expect("Cant fill nr 32 to EP15").as_mut().len = 31;
+  assert!(enq2.enqueue().is_none(), "Can insert more packets than limit");
 
+  // Test order
+  for i in 0..20 {
+    assert_eq!(deq1.dequeue().expect("Cant dequeue from EP1").as_ref().len, i);
+  }
+  drop(deq1);
+  let mut deq15 = f.for_dequeuing(Ep::Rx15).expect("Cant get dequeuer for EP 15");
+  assert!(f.for_dequeuing(Ep::Rx15).is_none(), "Can create two dequeuers for the same EP");
+  assert_eq!(deq15.dequeue().expect("Cant dequeue from EP15").as_ref().len, 30);
+  let mut deq1 = f.for_dequeuing(Ep::Tx1).expect("Cant get dequeuer for EP 1");
+  assert_eq!(deq1.dequeue().expect("Cant dequeue from EP15").as_ref().len, 20);
+  assert_eq!(deq15.dequeue().expect("Cant dequeue from EP15").as_ref().len, 31);
+  for i in 21..30 {
+    assert_eq!(deq1.dequeue().expect("Cant dequeue from EP1").as_ref().len, i);
+  }
+  info!(target: "usbmem", "FIFO test successfull");
 }
 
 
