@@ -77,6 +77,9 @@ fn test_fifo_2() {
  {
   let pool = fifos!(0, packetbufsize: 0);
   info!("Pool is {} bytes", core::mem::size_of_val(&pool));
+  let pool = fifos!();
+  info!("Pool is {} bytes", core::mem::size_of_val(&pool));
+
  }
 
   // Create static pool. Must not be dropped as long as usb is active. Max 32 elements.

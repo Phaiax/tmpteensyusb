@@ -51,6 +51,31 @@
 //!
 //!  fn work(data : &[u8]) {}
 //! ```
+//!
+//! ## Memory usage
+//!
+//! The overhead for the FIFO pointers and the pool allocation is 276 bytes
+//!
+//! The default queue `fifos!()` uses 2580 bytes.
+//!
+//! A `fifos(aaa, packetbufsize: bbb)` uses `276+(bbb+8)*aaa` bytes. (Includes two alignment bytes).
+//!
+//! ```
+//!   memory : MemoryPool,            | 4+(bbb+2+2+4)*aaa bytes
+//!       available : u32,            |   4 bytes
+//!       pool : [__; aaa],           |   (4+2+2+bbb)*aaa bytes
+//!          next : *mut              |     4 bytes
+//!          packet : UsbPacket       |
+//!             index : u16           |     2 bytes
+//!             len : u16             |     2 bytes
+//!             buf : [u8; bbb]       |     bbb bytes
+//!   fifos : [__; 30]                | (4+4+1)*30=270 bytes
+//!       first : *mut T,             |     4 bytes
+//!       last : *mut T,              |     4 bytes
+//!       borrow_state : BorrowState, |     1 byte
+//! ```
+//!
+//!
 use core::cell::UnsafeCell;
 use core::mem::size_of;
 use core::ops::{Deref, DerefMut};
@@ -286,57 +311,66 @@ impl<A:Array> Fifos<A> {
 /// State machine to track if a FifoEnqueuer or FifoDequeuer is alive for an endpoint.
 ///
 /// Has helper methods to transition state.
-enum BorrowState {
-    IsEnqueuing,
-    IsDequeuing,
-    IsEnqueuingAndDequeuing,
-    Free,
+// This could also be implemented as a mask, but that would require an additional
+// reference in the `FifoEnqueuer` and `FifoDequeuer` so it is not worth it.
+struct BorrowStateU8(u8);
+enum BorrowState
+{
+    IsEnqueuing = 0,
+    IsDequeuing = 1,
+    IsEnqueuingAndDequeuing = 2,
+    Free = 3,
 }
 
-impl BorrowState {
+impl BorrowStateU8 {
     /// Try to transition into enqueuing-enabled mode. Returns true if successful.
     fn set_enqueuing(&mut self) -> bool {
         let _guard = NoInterrupts::new();
-        match *self {
-            BorrowState::IsEnqueuing => false,
-            BorrowState::IsDequeuing => { *self = BorrowState::IsEnqueuingAndDequeuing; return true; },
-            BorrowState::IsEnqueuingAndDequeuing => false,
-            BorrowState::Free => { *self = BorrowState::IsEnqueuing; return true; } ,
+        match self.0 {
+            0 => false,
+            1 => { self.0 = BorrowState::IsEnqueuingAndDequeuing as u8; return true; },
+            2 => false,
+            3 => { self.0 = BorrowState::IsEnqueuing as u8; return true; } ,
+            _ => { unsafe { abort(); } },
         }
     }
     /// Try to transition into dequeuing-enabled mode. Returns true if successful.
     fn set_dequeuing(&mut self) -> bool {
         let _guard = NoInterrupts::new();
-        match *self {
-            BorrowState::IsEnqueuing => { *self = BorrowState::IsEnqueuingAndDequeuing; return true; },
-            BorrowState::IsDequeuing => false,
-            BorrowState::IsEnqueuingAndDequeuing => false,
-            BorrowState::Free => { *self = BorrowState::IsDequeuing; return true; } ,
+        match self.0 {
+            0 => { self.0 = BorrowState::IsEnqueuingAndDequeuing as u8; return true; },
+            1 => false,
+            2 => false,
+            3 => { self.0 = BorrowState::IsDequeuing as u8; return true; } ,
+            _ => { unsafe { abort(); } },
         }
     }
     /// Try to transition into enqueuing-disabled mode. Returns true if successful.
     fn clear_enqueuing(&mut self) {
         let _guard = NoInterrupts::new();
-        match *self {
-            BorrowState::IsEnqueuing => { *self = BorrowState::Free; },
-            BorrowState::IsDequeuing => { unsafe { abort(); } },
-            BorrowState::IsEnqueuingAndDequeuing => { *self = BorrowState::IsDequeuing; },
-            BorrowState::Free => { unsafe { abort(); } } ,
+        match self.0 {
+            0 => { self.0 = BorrowState::Free as u8; },
+            1 => { unsafe { abort(); } },
+            2 => { self.0 = BorrowState::IsDequeuing as u8; },
+            3 => { unsafe { abort(); } } ,
+            _ => { unsafe { abort(); } },
         }
     }
     /// Try to transition into dequeuing-disabled mode. Returns true if successful.
     fn clear_dequeuing(&mut self) {
         let _guard = NoInterrupts::new();
-        match *self {
-            BorrowState::IsEnqueuing => { unsafe { abort(); } },
-            BorrowState::IsDequeuing => { *self = BorrowState::Free; },
-            BorrowState::IsEnqueuingAndDequeuing => { *self = BorrowState::IsEnqueuing; },
-            BorrowState::Free => { unsafe { abort(); } } ,
+        match self.0 {
+            0 => { unsafe { abort(); } },
+            1 => { self.0 = BorrowState::Free as u8; },
+            2 => { self.0 = BorrowState::IsEnqueuing as u8; },
+            3 => { unsafe { abort(); } } ,
+            _ => { unsafe { abort(); } },
         }
     }
 }
 
 /// Pointers to the begin and end of the FIFO queue of an endpoint. Also tracks `BorrowState`.
+#[repr(packed)]
 struct FifoPtrs<T : Default + Reset + StoreNextPointer> {
     first : *mut T,
     last : *mut T,
@@ -349,7 +383,7 @@ struct FifoPtrs<T : Default + Reset + StoreNextPointer> {
     /// be allowed concurrently. (secured via NoInterrupt)
     /// (Interrupt routine may remove data from fifo while
     /// the user pushes new data in the main loop.)
-    borrow_state : BorrowState,
+    borrow_state : BorrowStateU8,
 }
 
 impl<T : Default + Reset + StoreNextPointer> Default for FifoPtrs<T> {
@@ -358,7 +392,7 @@ impl<T : Default + Reset + StoreNextPointer> Default for FifoPtrs<T> {
         FifoPtrs {
             first : 0 as *mut T,
             last : 0 as *mut T,
-            borrow_state : BorrowState::Free,
+            borrow_state : BorrowStateU8(BorrowState::Free as u8),
         }
     }
 }
