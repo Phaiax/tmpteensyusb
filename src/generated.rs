@@ -1,6 +1,23 @@
 #![allow(dead_code)]
 // init for EEPROM
-    const CONFIGDESCRIPTORTREE: &'static [u8] = &[
+    pub const DEVICEDESCRIPTOR: &'static [u8] = &[
+        0x12,      // bLength
+        0x1,      // bDescriptorType
+        0x0, 0x2,// bcdUSB
+        0x2,      // bDeviceClass
+        0x0,      // bDeviceSubClass
+        0x0,      // bDeviceProtocol
+        0x40,      // bMaxPacketSize0
+        0xc0, 0x16,// idVendor
+        0x83, 0x4,// idProduct
+        0x0, 0x1,// bcdDevice
+        0x1,      // iManufacturer
+        0x2,      // iProduct
+        0x3,      // iSerialNumber
+        0x1,      // bNumConfigurations
+    ];
+             
+    pub const CONFIGDESCRIPTORTREE: &'static [u8] = &[
         // CONFIGURATION DESCRIPTOR
             0x9,      // bLength
             0x2,      // bDescriptorType
@@ -83,43 +100,43 @@
         0x3,      // bDescriptorType
         0x9, 0x4
     ];
-    const STRING_1_DESCRIPTOR: &'static [u8] = &[
+    pub const STRING_1_DESCRIPTOR: &'static [u8] = &[
         0x8,      // bLength
         0x3,      // bDescriptorType
         // Daniel
         0x44, 0x61, 0x6e, 0x69, 0x65, 0x6c, 
     ];
-    const STRING_2_DESCRIPTOR: &'static [u8] = &[
+    pub const STRING_2_DESCRIPTOR: &'static [u8] = &[
         0xc,      // bLength
         0x3,      // bDescriptorType
         // THE Profud
         0x54, 0x48, 0x45, 0x20, 0x50, 0x72, 0x6f, 0x66, 0x75, 0x64, 
     ];
-    const STRING_3_DESCRIPTOR: &'static [u8] = &[
+    pub const STRING_3_DESCRIPTOR: &'static [u8] = &[
         0x7,      // bLength
         0x3,      // bDescriptorType
         // 12345
         0x31, 0x32, 0x33, 0x34, 0x35, 
     ];
-    const STRING_4_DESCRIPTOR: &'static [u8] = &[
+    pub const STRING_4_DESCRIPTOR: &'static [u8] = &[
         0x6,      // bLength
         0x3,      // bDescriptorType
         // Blub
         0x42, 0x6c, 0x75, 0x62, 
     ];
-    const STRING_5_DESCRIPTOR: &'static [u8] = &[
+    pub const STRING_5_DESCRIPTOR: &'static [u8] = &[
         0x6,      // bLength
         0x3,      // bDescriptorType
         // Int1
         0x49, 0x6e, 0x74, 0x31, 
     ];
-    const STRING_6_DESCRIPTOR: &'static [u8] = &[
+    pub const STRING_6_DESCRIPTOR: &'static [u8] = &[
         0x6,      // bLength
         0x3,      // bDescriptorType
         // Int2
         0x49, 0x6e, 0x74, 0x32, 
     ];
-    const STRING_7_DESCRIPTOR: &'static [u8] = &[
+    pub const STRING_7_DESCRIPTOR: &'static [u8] = &[
         0xd,      // bLength
         0x3,      // bDescriptorType
         // No str fnd.
@@ -138,15 +155,38 @@
             _ => STRING_7_DESCRIPTOR,
         }
     }
-use main as user_entry_function;
 
-            #[start]
-            fn generated_start(_: isize, _: *const *const u8) -> isize {
-				startup();
-                user_entry_function();
-                0
-            }
-            
+    pub const MAX_ENDPOINT_ADDR : u8 = 4;
+
+    pub const NUM_BUFFERDESCRIPTORS : usize = 20;
+
+    extern {
+        #[no_mangle]
+        #[link_name="_usbbufferdescriptors"]
+        static mut usbbufferdescriptors : [::usb::BufferDescriptor; 20];
+    }
+
+    #[allow(non_snake_case, dead_code)]
+    #[inline(always)]
+    pub fn BufferDescriptors() -> &'static mut [::usb::BufferDescriptor; 20] {
+        unsafe { &mut usbbufferdescriptors }
+    }
+
+        
+
+    pub const ENDPOINTCONFIG_FOR_REGISTERS: &'static [u8] = &[
+		 0x00, 0x00, 0x19, 0x15, 0x19, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+
+	use main as user_entry_function;
+
+	#[start]
+	fn generated_start(_: isize, _: *const *const u8) -> isize {
+		startup();
+		user_entry_function();
+		0
+	}
+
 
 use zinc::hal::mem_init;
 use zinc::hal::k20::watchdog;
