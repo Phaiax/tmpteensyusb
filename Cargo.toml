@@ -13,6 +13,13 @@ mcu_k20 = ["zinc/mcu_k20", "platformtreeb/mcu_k20"] # also enables the mcu_k20 f
 [dependencies]
 zinc = { path =  "../zinc" }
 
+[dependencies.ioreg]
+path = "../zinc/ioreg"
+
+[dependencies.volatile_cell]
+path = "../zinc/volatile_cell"
+
+
 [build-dependencies]
 platformtreeb = { path =  "../zinc/platformtreeb" }
 

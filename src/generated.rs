@@ -3,7 +3,7 @@
     pub const DEVICEDESCRIPTOR: &'static [u8] = &[
         0x12,      // bLength
         0x1,      // bDescriptorType
-        0x0, 0x2,// bcdUSB
+        0x1, 0x1,// bcdUSB
         0x2,      // bDeviceClass
         0x0,      // bDeviceSubClass
         0x0,      // bDeviceProtocol
@@ -101,46 +101,46 @@
         0x9, 0x4
     ];
     pub const STRING_1_DESCRIPTOR: &'static [u8] = &[
-        0x8,      // bLength
+        0xe,      // bLength
         0x3,      // bDescriptorType
         // Daniel
-        0x44, 0x61, 0x6e, 0x69, 0x65, 0x6c, 
+        0x44, 0x0, 0x61, 0x0, 0x6e, 0x0, 0x69, 0x0, 0x65, 0x0, 0x6c, 0x0, 
     ];
     pub const STRING_2_DESCRIPTOR: &'static [u8] = &[
-        0xc,      // bLength
+        0x16,      // bLength
         0x3,      // bDescriptorType
         // THE Profud
-        0x54, 0x48, 0x45, 0x20, 0x50, 0x72, 0x6f, 0x66, 0x75, 0x64, 
+        0x54, 0x0, 0x48, 0x0, 0x45, 0x0, 0x20, 0x0, 0x50, 0x0, 0x72, 0x0, 0x6f, 0x0, 0x66, 0x0, 0x75, 0x0, 0x64, 0x0, 
     ];
     pub const STRING_3_DESCRIPTOR: &'static [u8] = &[
-        0x7,      // bLength
+        0xc,      // bLength
         0x3,      // bDescriptorType
         // 12345
-        0x31, 0x32, 0x33, 0x34, 0x35, 
+        0x31, 0x0, 0x32, 0x0, 0x33, 0x0, 0x34, 0x0, 0x35, 0x0, 
     ];
     pub const STRING_4_DESCRIPTOR: &'static [u8] = &[
-        0x6,      // bLength
+        0xa,      // bLength
         0x3,      // bDescriptorType
         // Blub
-        0x42, 0x6c, 0x75, 0x62, 
+        0x42, 0x0, 0x6c, 0x0, 0x75, 0x0, 0x62, 0x0, 
     ];
     pub const STRING_5_DESCRIPTOR: &'static [u8] = &[
-        0x6,      // bLength
+        0xa,      // bLength
         0x3,      // bDescriptorType
         // Int1
-        0x49, 0x6e, 0x74, 0x31, 
+        0x49, 0x0, 0x6e, 0x0, 0x74, 0x0, 0x31, 0x0, 
     ];
     pub const STRING_6_DESCRIPTOR: &'static [u8] = &[
-        0x6,      // bLength
+        0xa,      // bLength
         0x3,      // bDescriptorType
         // Int2
-        0x49, 0x6e, 0x74, 0x32, 
+        0x49, 0x0, 0x6e, 0x0, 0x74, 0x0, 0x32, 0x0, 
     ];
     pub const STRING_7_DESCRIPTOR: &'static [u8] = &[
-        0xd,      // bLength
+        0x18,      // bLength
         0x3,      // bDescriptorType
         // No str fnd.
-        0x4e, 0x6f, 0x20, 0x73, 0x74, 0x72, 0x20, 0x66, 0x6e, 0x64, 0x2e, 
+        0x4e, 0x0, 0x6f, 0x0, 0x20, 0x0, 0x73, 0x0, 0x74, 0x0, 0x72, 0x0, 0x20, 0x0, 0x66, 0x0, 0x6e, 0x0, 0x64, 0x0, 0x2e, 0x0, 
     ];
     pub fn get_str(strdescr_id : u8) -> &'static [u8] {
         match strdescr_id { 
@@ -177,6 +177,19 @@
     pub const ENDPOINTCONFIG_FOR_REGISTERS: &'static [u8] = &[
 		 0x00, 0x00, 0x19, 0x15, 0x19, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ];
+    #[allow(non_snake_case, dead_code)]
+    #[inline(always)]
+    pub fn EndpointconfigForRegisters() -> &'static [u8] {
+        unsafe { &mut ENDPOINTCONFIG_FOR_REGISTERS }
+    }
+
+use usbdriver::{UsbDriver, UsbDriverRef, UsbDriverOption};
+
+pub static mut USBDRIVER : UsbDriverOption = UsbDriverOption::none();
+pub fn driver_ref() -> UsbDriverRef {
+    unsafe { USBDRIVER.unwrap() }
+}
+
 
 	use main as user_entry_function;
 
@@ -186,7 +199,6 @@
 		user_entry_function();
 		0
 	}
-
 
 use zinc::hal::mem_init;
 use zinc::hal::k20::watchdog;
@@ -198,10 +210,12 @@ use zinc::hal::cortex_m4::systick;
 #[inline(always)]
 pub fn startup() {
 
+        watchdog::init(watchdog::State::Disabled);
+
+    
         mem_init::init_stack();
         mem_init::init_data();
         
-        watchdog::init(watchdog::State::Disabled);
 
         SIM().scgc6.ignoring_state()
             .set_rtc(Sim_scgc6_rtc::Enabled)           // Allow access to RTC module
@@ -224,12 +238,13 @@ pub fn startup() {
             .set_alls(Smc_pmprot_alls::Allowed)
             .set_avlls(Smc_pmprot_avlls::Allowed);
 
-        // enable osc, 8-32 MHz range, low power mode
-        // MCG_C2 = MCG_C2_RANGE0(2) | MCG_C2_EREFS;
+        // // enable capacitors for crystal
+        // OSC0_CR = OSC_SC8P | OSC_SC2P | OSC_ERCLKEN;
         OSC().cr
             .ignoring_state()
             .set_sc8p(true)
-            .set_sc2p(true);
+            .set_sc2p(true)
+            .set_er(Osc_cr_er::Enabled);
 
         // enable osc, 8-32 MHz range, low power mode
         // MCG_C2 = MCG_C2_RANGE0(2) | MCG_C2_EREFS;
@@ -246,6 +261,7 @@ pub fn startup() {
 
         // wait for crystal oscillator to begin
         wait_for!(MCG().status.oscinit0() == Mcg_status_oscinit0::Initialized);
+        // wait for FLL to use oscillator
         wait_for!(MCG().status.irefst() == Mcg_status_irefst::External);
         // wait for MCGOUT to use oscillator
         wait_for!(MCG().status.clkst() == Mcg_status_clkst::External);
@@ -273,7 +289,7 @@ pub fn startup() {
             .set_outdiv4(2);
         // SIM_CLKDIV2 = SIM_CLKDIV2_USBDIV(2) | SIM_CLKDIV2_USBFRAC;
         SIM().clkdiv2.ignoring_state()
-            .set_usbdiv(1)
+            .set_usbdiv(2)
             .set_usbfrac(true);
 
         // switch to PLL as clock source, FLL input = 16 MHz / 512
@@ -284,7 +300,7 @@ pub fn startup() {
         // wait for PLL clock to be used
         wait_for!(MCG().status.clkst() == Mcg_status_clkst::PLL);
         // now we're in PEE mode
-        
+
         // USB uses PLL clock, trace is CPU clock, CLKOUT=OSCERCLK0
         // SIM_SOPT2 = SIM_SOPT2_USBSRC | SIM_SOPT2_PLLFLLSEL | SIM_SOPT2_TRACECLKSEL
         //      | SIM_SOPT2_CLKOUTSEL(6);
@@ -302,12 +318,12 @@ pub fn startup() {
 
 
 
-        // The CLKSOURCE bit in SysTick Control and Status register is 
+        // The CLKSOURCE bit in SysTick Control and Status register is
         // always set to select the core clock.
         // Because the timing reference (FCLK) is a variable frequency, the TENMS bit in the
         // SysTick Calibration Value Register is always zero.
         // Set tick freq to 1 ms
-        systick::setup(72_000_000/1000); // 
+        systick::setup(72_000_000/1000); //
         systick::enable();
 
 }

@@ -47,11 +47,12 @@
 
 
 use core::mem;
+use core::fmt;
 use core::ptr;
 use core::cell::UnsafeCell;
 use core::ops::Drop;
 use zinc::hal::cortex_m4::irq::NoInterrupts;
-use usbmem::StoreNext;
+use usbmem::{StoreNext, RetrieveNext};
 
 
 /// Implementers allow recycling of itself in a memory pool.
@@ -76,9 +77,15 @@ pub struct UsbPacket {
     /// ?
     index : u16,
     /// Ptr for fifo functionality. Must point to an allocated UsbPacket
-    next : *mut UsbPacket,
+    next : Option<AllocatedUsbPacket>,
 }
 
+impl fmt::Debug for UsbPacket {
+    fn fmt(&self, f : &mut fmt::Formatter) -> fmt::Result {
+        try!(writeln!(f, "[UsbPacket len: {}, index: {}, first byte: {}", self.len, self.index, self.buf[0]));
+        writeln!(f, "next: {:?} ]", self.next)
+    }
+}
 
 impl Default for UsbPacket {
     /// Used for memory pool initialization.
@@ -88,7 +95,7 @@ impl Default for UsbPacket {
             len : 0,
             index : 0,
             buf : unsafe { mem::uninitialized() },
-            next : ptr::null_mut(),
+            next : None,
         }
     }
 }
@@ -104,6 +111,7 @@ impl Reset for UsbPacket {
 
 /// This can only be created via the memory pool
 /// or some magic. Only the usb driver must do magic.
+#[derive(Debug)]
 pub struct AllocatedUsbPacket {
     inner : &'static mut UsbPacket,
 }
@@ -125,21 +133,35 @@ impl AllocatedUsbPacket {
     pub fn set_index(&mut self, index : u16) {
         self.inner.index = index;
     }
+    pub fn recycle<T:MemoryPoolTrait>(self, pool : &T)
+    {
+        pool.free(self);
+    }
 }
 
 
-impl StoreNext for AllocatedUsbPacket {
+impl StoreNext for UsbPacket {
     unsafe fn set_next(&mut self, next : AllocatedUsbPacket) {
-        self.inner.next = next.inner as *mut UsbPacket
+        self.next = Some(next);
     }
+}
+
+
+impl RetrieveNext for AllocatedUsbPacket {
     unsafe fn take_next(&mut self) -> Option<AllocatedUsbPacket> {
-        if self.inner.next.is_null() {
-            None
-        } else {
-            let ret = Some (AllocatedUsbPacket { inner : &mut *self.inner.next });
-            self.inner.next = ptr::null_mut();
-            ret
+        self.inner.next.take()
+    }
+    unsafe fn ptr_inner(&mut self) -> *mut UsbPacket {
+        self.inner as *mut UsbPacket
+    }
+    unsafe fn count_queue(&self) -> usize {
+        let mut cnt = 0;
+        let mut next : Option<&AllocatedUsbPacket> = Some(self); // count Self
+        while next.is_some() {
+            cnt += 1;
+            next = next.unwrap().inner.next.as_ref();
         }
+        cnt
     }
 }
 
@@ -159,7 +181,7 @@ impl BufferPointerMagic for AllocatedUsbPacket {
 
 impl Drop for AllocatedUsbPacket {
     fn drop(&mut self) {
-        panic!();
+        panic!("Must never drop AllocatedUsbPacket!");
     }
 }
 
@@ -183,16 +205,11 @@ impl<A : Array<Item=UsbPacket>> MemoryPoolOption<A> {
     pub fn unwrap(&'static mut self) -> MemoryPoolRef<A> {
         match self.0 {
             Some(ref mut p) => MemoryPoolRef(p),
-            None => { panic!(); },
+            None => { panic!("Call MemoryPoolOption::init() first"); },
         }
     }
 }
 
-impl<A:Array<Item = UsbPacket>> Drop for MemoryPoolOption<A> {
-    fn drop(&mut self) {
-        panic!();
-    }
-}
 
 /// Usb Packet memory is allocated from this memory pool.
 /// Max 32 packets are used since the bits of an u32 are used to remember allocations.
@@ -202,8 +219,29 @@ pub struct MemoryPool<A : Array> {
     /// Bitmask to track unallocated pool elements.
     /// 1: Unallocated, 0: InUse
     available : UnsafeCell<u32>,
+    /// number of requested priority allocations
+    priority_requests : UnsafeCell<usize>,
 }
 
+
+
+
+impl<A : Array> MemoryPool<A> {
+    /// Create new pool
+    pub fn new() -> Self {
+        MemoryPool {
+            pool : UnsafeCell::new(A::default()),
+            available : UnsafeCell::new(0xFFFFFFFF),
+            priority_requests : UnsafeCell::new(0),
+        }
+    }
+}
+
+impl<A:Array> Drop for MemoryPool<A> {
+    fn drop(&mut self) {
+       panic!("Must never drop MemoryPool");
+    }
+}
 
 /// This type wraps a `'static` memory pool. We must only allocate `'static`
 /// memory because we want the returned `AllocatedUsbPacket` to practically own the memory.
@@ -212,20 +250,36 @@ pub struct MemoryPool<A : Array> {
 /// can not be destroyed.
 pub struct MemoryPoolRef<A:'static + Array<Item=UsbPacket>>(&'static MemoryPool<A>);
 
-impl<A> MemoryPool<A> where A:Array<Item = UsbPacket> {
-    /// Create new pool
-    pub fn new() -> Self {
-        MemoryPool {
-            pool : UnsafeCell::new(A::default()),
-            available : UnsafeCell::new(0xFFFFFFFF),
-        }
+pub trait MemoryPoolTrait {
+    /// Allocates the next free slot in the memory pool if not completely filled.
+    fn allocate(&self) -> Option<AllocatedUsbPacket>;
+    /// Allows reusing the slot behind pointer `item`. Calls `reset()` from trait `Reset` on `item`.
+    fn free(&self, item : AllocatedUsbPacket);
+    /// It is assumed that a call to allocate() has failed and there are no free packets
+    /// at the moment. Call this to register prioritized interest in the next packet.
+    /// Implement
+    ///
+    /// ```
+    /// #[link_name="handle_priority_allocation"]
+    /// fn my_priority_allocation(p : AllocatedUsbPacket) -> Option<AllocatedUsbPacket> {}
+    /// ```
+    ///
+    /// Return the packet if you don't need it.
+    fn allocate_priority(&self);
+    fn clear_priority_allocation_requests(&self);
+}
+
+impl<A> MemoryPoolRef<A> where A:Array<Item = UsbPacket> {
+    /// not interrupt safe
+    pub fn available(&self) -> usize {
+        let available : u32 = unsafe { *self.0.available.get() };
+        available.count_ones() as usize
     }
 }
 
-
-impl<A> MemoryPoolRef<A> where A:Array<Item = UsbPacket> {
+impl<A> MemoryPoolTrait for MemoryPoolRef<A> where A:Array<Item = UsbPacket> {
     /// Allocates the next free slot in the memory pool if not completely filled.
-    pub fn allocate(&self) -> Option<AllocatedUsbPacket> {
+    fn allocate(&self) -> Option<AllocatedUsbPacket> {
         let _guard = NoInterrupts::new();
         let available : &mut u32 = unsafe { &mut *self.0.available.get() };
         let pool : &mut A = unsafe { &mut *self.0.pool.get() };
@@ -234,25 +288,64 @@ impl<A> MemoryPoolRef<A> where A:Array<Item = UsbPacket> {
             return None;
         }
         *available = *available & !(0x80000000 >> n);
+        //info!("Allocate n {}, addr 0x{:x}", n, unsafe { pool.as_mut_ptr().offset(n as isize) as usize } );
         Some(AllocatedUsbPacket {
             inner : unsafe { &mut * pool.as_mut_ptr().offset(n as isize) }
         })
     }
     /// Allows reusing the slot behind pointer `item`. Calls `reset()` from trait `Reset` on `item`.
-    pub fn free(&self, item : AllocatedUsbPacket) {
+    fn free(&self, mut item : AllocatedUsbPacket) {
+        {
+            let guard = NoInterrupts::new();
+            let priority_requests : &mut usize = unsafe { &mut *self.0.priority_requests.get() };
+            if *priority_requests > 0 {
+                *priority_requests -= 1;
+                mem::drop(guard);
+                match unsafe { handle_priority_allocation(item) } {
+                    None => return,
+                    Some(packet) => {
+                        info!("Prio alloc did not need the packet.");
+                        item = packet;
+                    }
+                }
+            }
+        }
         let pool : &mut A = unsafe { &mut *self.0.pool.get() };
         let offset = item.inner as *const UsbPacket as usize - pool.as_ptr() as usize;
         let n = offset / mem::size_of::<A::Item>();
+        //info!("{} free: packet addr 0x{:x}, pool 0x{:x}", n, item.inner as *const UsbPacket as usize, pool.as_ptr() as usize, n);
         if n >= A::capacity() { // if the AllocatedPackets address is < Array baseaddr, offset has overflowed
             panic!();
         }
         let mask = 0x80000000 >> n;
         item.inner.reset();
         let _guard = NoInterrupts::new();
+        mem::forget(item);
         let available : &mut u32 = unsafe { &mut *self.0.available.get() };
         *available |= mask;
     }
+    ///
+    fn allocate_priority(&self) {
+        let _guard = NoInterrupts::new();
+        let priority_requests : &mut usize = unsafe { &mut *self.0.priority_requests.get() };
+        *priority_requests += 1;
+    }
+    ///
+    fn clear_priority_allocation_requests(&self) {
+        let _guard = NoInterrupts::new();
+        unsafe { *self.0.priority_requests.get() = 0; };
+    }
 }
+
+extern {
+    fn handle_priority_allocation(p : AllocatedUsbPacket) -> Option<AllocatedUsbPacket>;
+}
+
+// #[link_name="handle_priority_allocation"]
+// #[linkage = "weak"]
+// fn handle_priority_allocation(p : AllocatedUsbPacket) -> Option<AllocatedUsbPacket> {
+//     Some(p)
+// }
 
 // *****************************************************
 // The following code is taken from the crate ArrayVec and slightly modified.

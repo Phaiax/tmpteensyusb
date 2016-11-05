@@ -81,36 +81,42 @@ use core::mem;
 use core::ptr;
 
 use zinc::hal::cortex_m4::irq::NoInterrupts;
-use usbmempool::AllocatedUsbPacket;
+use usbmempool::{UsbPacket, AllocatedUsbPacket, MemoryPoolTrait};
 
 pub trait StoreNext {
     unsafe fn set_next(&mut self, next : AllocatedUsbPacket);
+}
+
+pub trait RetrieveNext {
     unsafe fn take_next(&mut self) -> Option<AllocatedUsbPacket>;
+    unsafe fn count_queue(&self) -> usize;
+    unsafe fn ptr_inner(&mut self) -> *mut UsbPacket;
 }
 
 
-#[macro_export]
+//#[macro_export]
 /// See `usbmem` module configuration for examples.
-macro_rules! fifos {
-    () => (
-        fifos!(32)
-    );
-    ($fifocapacity:tt) => (
-        {
-            use $crate::usbmem::UsbPacket;
-            fifos!($fifocapacity, UsbPacket)
-        }
-    );
-    ($fifocapacity:tt, $packettype:ty) => (
-        {
-            assert!($fifocapacity <= 32);
-            use $crate::usbmem::{Fifos, Array};
-            Fifos::<[$packettype; $fifocapacity]>::new()
-        }
-    );
-}
+//macro_rules! fifos {
+//    () => (
+//        fifos!(32)
+//    );
+//    ($fifocapacity:tt) => (
+//        {
+//            use $crate::usbmem::UsbPacket;
+//            fifos!($fifocapacity, UsbPacket)
+//        }
+//    );
+//    ($fifocapacity:tt, $packettype:ty) => (
+//        {
+//            assert!($fifocapacity <= 32);
+//            use $crate::usbmem::{Fifos, Array};
+//            Fifos::<[$packettype; $fifocapacity]>::new()
+//        }
+//    );
+//}
 
 /// All endpoints
+#[derive(Clone, Copy)]
 pub enum Ep {
     Rx1 = 0,
     Tx1 = 1,
@@ -149,7 +155,7 @@ pub enum Ep {
 #[repr(packed)]
 struct FifoPtrs {
     first : Option<AllocatedUsbPacket>,
-    last : *mut AllocatedUsbPacket,
+    last : *mut UsbPacket,
 }
 
 impl Default for FifoPtrs {
@@ -158,6 +164,36 @@ impl Default for FifoPtrs {
         FifoPtrs {
             first : None,
             last : ptr::null_mut(),
+        }
+    }
+}
+
+impl FifoPtrs {
+    fn enqueue(&mut self, mut packet : AllocatedUsbPacket) {
+        let new_last = unsafe { packet.ptr_inner() };
+        if self.first.is_none() {
+            self.first = Some(packet);
+        } else {
+            unsafe { (*self.last).set_next(packet); }
+        }
+        self.last = new_last;
+    }
+    fn dequeue(&mut self) -> Option<AllocatedUsbPacket> {
+        match self.first.take() {
+            None => { return None },
+            Some(mut first) => {
+                self.first = unsafe { first.take_next() };
+                if self.first.is_none() {
+                    self.last = ptr::null_mut();
+                }
+                return Some(first);
+            }
+        }
+    }
+    fn len(&mut self) -> usize {
+        match self.first.as_ref() {
+            None => 0,
+            Some(p) => unsafe { p.count_queue() },
         }
     }
 }
@@ -189,31 +225,41 @@ impl Fifos {
         }
     }
 
-    pub fn enqueue(&self, endpoint : Ep, mut packet : AllocatedUsbPacket) {
+    pub fn enqueue(&self, endpoint : Ep, packet : AllocatedUsbPacket) {
         let _guard = NoInterrupts::new();
         let fifo = unsafe { &mut *self.fifos[endpoint as usize].get() };
-
-        let new_last = &mut packet as *mut AllocatedUsbPacket;
-        if fifo.first.is_none() {
-            fifo.first = Some(packet);
-        } else {
-            unsafe { (*fifo.last).set_next(packet); }
-        }
-        fifo.last = new_last;
+        fifo.enqueue(packet);
     }
 
     pub fn dequeue(&self, endpoint : Ep) -> Option<AllocatedUsbPacket> {
         let _guard = NoInterrupts::new();
         let fifo = unsafe { &mut *self.fifos[endpoint as usize].get() };
+        fifo.dequeue()
+    }
 
-        match fifo.first.take() {
-            None => { return None },
-            Some(mut first) => {
-                fifo.first = unsafe { first.take_next() };
-                if fifo.first.is_none() {
-                    fifo.last = ptr::null_mut();
+    pub fn len(&self, endpoint : Ep) -> usize {
+        let _guard = NoInterrupts::new();
+        let fifo = unsafe { &mut *self.fifos[endpoint as usize].get() };
+        fifo.len()
+    }
+
+    pub fn clear<T:MemoryPoolTrait>(&self, endpoint : Ep, pool : &T) {
+        loop {
+            match self.dequeue(endpoint) {
+                Some(p) => pool.free(p),
+                None => return
+            }
+        }
+    }
+
+    pub fn clear_all<T:MemoryPoolTrait>(&self, pool : &T) {
+        let _guard = NoInterrupts::new();
+        for fifo in self.fifos.iter() {
+            loop {
+                match unsafe { &mut *fifo.get() }.dequeue() {
+                    Some(p) => pool.free(p),
+                    None => break
                 }
-                return Some(first);
             }
         }
     }
