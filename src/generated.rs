@@ -1,9 +1,9 @@
 #![allow(dead_code)]
 // init for EEPROM
     pub const DEVICEDESCRIPTOR: &'static [u8] = &[
-        0x12,      // bLength
+        18,      // bLength
         0x1,      // bDescriptorType
-        0x1, 0x1,// bcdUSB
+        1, 1,// bcdUSB
         0x2,      // bDeviceClass
         0x0,      // bDeviceSubClass
         0x0,      // bDeviceProtocol
@@ -19,7 +19,7 @@
              
     pub const CONFIGDESCRIPTORTREE: &'static [u8] = &[
         // CONFIGURATION DESCRIPTOR
-            0x9,      // bLength
+            9,      // bLength
             0x2,      // bDescriptorType
             0x43, 0x0,// wTotalLength
             0x2,      // bNumInterfaces
@@ -29,7 +29,7 @@
             0x32,      // bMaxPower
             
         // INTERFACE
-            0x9,      // bLength
+            9,      // bLength
             0x4,      // bDescriptorType
             0x0,      // bInterfaceNumber
             0x0,      // bAlternateSetting
@@ -39,28 +39,30 @@
             0x1,      // bInterfaceProtocol
             0x5,      // iInterface
             
-        // CDC
-            0x5,      // bLength
-            0x24,      // bDescriptorType
+        // CDC Interface Functional Descriptor : Header
+            5,        // bLength
+            0x24,     // bDescriptorType
             0x0,      // bDescriptorSubType
-            0x10, 0x1, 
-        // CDC
-            0x5,      // bLength
-            0x24,      // bDescriptorType
+            16, 1,    // bcdCDC
+        // CDC Interface Functional Descriptor : CallManagement
+            5,        // bLength
+            0x24,     // bDescriptorType
             0x1,      // bDescriptorSubType
-            0x0, 0x1, 
-        // CDC
-            0x4,      // bLength
-            0x24,      // bDescriptorType
+            0b00000000, // bmCapabilities
+            1, // bDataInterface
+        // CDC Interface Functional Descriptor : AbstractControlManagement
+            4,        // bLength
+            0x24,     // bDescriptorType
             0x2,      // bDescriptorSubType
-            0x6, 
-        // CDC
-            0x5,      // bLength
-            0x24,      // bDescriptorType
+            0b00000110, // bmCapabilities
+        // CDC Interface Functional Descriptor : Union
+            5,        // bLength
+            0x24,     // bDescriptorType
             0x6,      // bDescriptorSubType
-            0x0, 0x1, 
+            0,        // bControlInterface
+			1,        // bSubordinateInterface0
         // ENDPOINT
-            0x7,      // bLength
+            7,      // bLength
             0x5,      // bDescriptorType
             0x82,      // bEndpointAddress
             0x3,      // bmAttributes
@@ -68,7 +70,7 @@
             0x40,      // bInterval
             
         // INTERFACE
-            0x9,      // bLength
+            9,      // bLength
             0x4,      // bDescriptorType
             0x1,      // bInterfaceNumber
             0x0,      // bAlternateSetting
@@ -79,7 +81,7 @@
             0x6,      // iInterface
             
         // ENDPOINT
-            0x7,      // bLength
+            7,      // bLength
             0x5,      // bDescriptorType
             0x3,      // bEndpointAddress
             0x2,      // bmAttributes
@@ -87,7 +89,7 @@
             0x0,      // bInterval
             
         // ENDPOINT
-            0x7,      // bLength
+            7,      // bLength
             0x5,      // bDescriptorType
             0x84,      // bEndpointAddress
             0x2,      // bmAttributes
@@ -96,48 +98,48 @@
             
     ];
     const STRINGZERODESCRIPTOR: &'static [u8] = &[
-        0x4,      // bLength
+        4,      // bLength
         0x3,      // bDescriptorType
         0x9, 0x4
     ];
     pub const STRING_1_DESCRIPTOR: &'static [u8] = &[
-        0xe,      // bLength
+        14,      // bLength
         0x3,      // bDescriptorType
         // Daniel
         0x44, 0x0, 0x61, 0x0, 0x6e, 0x0, 0x69, 0x0, 0x65, 0x0, 0x6c, 0x0, 
     ];
     pub const STRING_2_DESCRIPTOR: &'static [u8] = &[
-        0x16,      // bLength
+        22,      // bLength
         0x3,      // bDescriptorType
         // THE Profud
         0x54, 0x0, 0x48, 0x0, 0x45, 0x0, 0x20, 0x0, 0x50, 0x0, 0x72, 0x0, 0x6f, 0x0, 0x66, 0x0, 0x75, 0x0, 0x64, 0x0, 
     ];
     pub const STRING_3_DESCRIPTOR: &'static [u8] = &[
-        0xc,      // bLength
+        12,      // bLength
         0x3,      // bDescriptorType
         // 12345
         0x31, 0x0, 0x32, 0x0, 0x33, 0x0, 0x34, 0x0, 0x35, 0x0, 
     ];
     pub const STRING_4_DESCRIPTOR: &'static [u8] = &[
-        0xa,      // bLength
+        10,      // bLength
         0x3,      // bDescriptorType
         // Blub
         0x42, 0x0, 0x6c, 0x0, 0x75, 0x0, 0x62, 0x0, 
     ];
     pub const STRING_5_DESCRIPTOR: &'static [u8] = &[
-        0xa,      // bLength
+        10,      // bLength
         0x3,      // bDescriptorType
         // Int1
         0x49, 0x0, 0x6e, 0x0, 0x74, 0x0, 0x31, 0x0, 
     ];
     pub const STRING_6_DESCRIPTOR: &'static [u8] = &[
-        0xa,      // bLength
+        10,      // bLength
         0x3,      // bDescriptorType
         // Int2
         0x49, 0x0, 0x6e, 0x0, 0x74, 0x0, 0x32, 0x0, 
     ];
     pub const STRING_7_DESCRIPTOR: &'static [u8] = &[
-        0x18,      // bLength
+        24,      // bLength
         0x3,      // bDescriptorType
         // No str fnd.
         0x4e, 0x0, 0x6f, 0x0, 0x20, 0x0, 0x73, 0x0, 0x74, 0x0, 0x72, 0x0, 0x20, 0x0, 0x66, 0x0, 0x6e, 0x0, 0x64, 0x0, 0x2e, 0x0, 

@@ -44,6 +44,15 @@ pub enum OddEven {
     Odd = 0b0000_0001,
 }
 
+impl OddEven {
+    pub fn toggle(&mut self) {
+        *self = match *self {
+            OddEven::Even => OddEven::Odd,
+            OddEven::Odd => OddEven::Even,
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug)]
 pub enum TxRx {
     Rx = 0b0000_0000,
@@ -116,10 +125,12 @@ impl BufferDescriptor_control_Get {
 impl<'a> BufferDescriptor_control_Update<'a> {
     /// Set the value of the pid_tok field
     #[inline(always)]
-    pub fn set_pid_tok<'b>(&'b mut self, new_value: u32) -> &'b mut BufferDescriptor_control_Update<'a> {
-          self.value = (self.value & !(0b1111 << 2)) | ((new_value as u32) & 0b1111) << 2;
-          self.mask |= 0b1111 << 2;
-          self
+    pub fn set_pid_tok<'b>(&'b mut self,
+                           new_value: u32)
+                           -> &'b mut BufferDescriptor_control_Update<'a> {
+        self.value = (self.value & !(0b1111 << 2)) | ((new_value as u32) & 0b1111) << 2;
+        self.mask |= 0b1111 << 2;
+        self
     }
     /// Clear all
     #[inline(always)]
@@ -130,7 +141,10 @@ impl<'a> BufferDescriptor_control_Update<'a> {
     }
     /// Give back to controller
     #[inline(always)]
-    pub fn give_back<'b>(&'b mut self, buffersize : usize, data01 : BufferDescriptor_control_data01) -> &'b mut BufferDescriptor_control_Update<'a> {
+    pub fn give_back<'b>(&'b mut self,
+                         buffersize: usize,
+                         data01: BufferDescriptor_control_data01)
+                         -> &'b mut BufferDescriptor_control_Update<'a> {
         self.set_own(BufferDescriptor_control_own::Controller)
             .set_dts(true)
             .set_data01(data01)
@@ -143,14 +157,14 @@ impl BufferDescriptor_addr {
 }
 
 impl BufferDescriptor {
-
-    pub fn swap_usb_packet(&self, i : Option<AllocatedUsbPacket>) -> Option<AllocatedUsbPacket> {
+    pub fn swap_usb_packet(&self, i: Option<AllocatedUsbPacket>) -> Option<AllocatedUsbPacket> {
         let a = self.addr.addr();
         self.addr.ignoring_state().set_addr(match i {
             Some(p) => unsafe { p.into_buf_ptr() as u32 },
-            None => 0 });
+            None => 0,
+        });
         if a != 0 {
-            Some( unsafe { AllocatedUsbPacket::from_raw_buf_ptr(a as *mut u8) } )
+            Some(unsafe { AllocatedUsbPacket::from_raw_buf_ptr(a as *mut u8) })
         } else {
             None
         }
@@ -160,10 +174,9 @@ impl BufferDescriptor {
     pub unsafe fn interpret_buf_as_setup_packet(&self) -> SetupPacket {
         assert!(self.addr.addr() != 0);
         assert!(self.control.bc() == 8);
-        let setuppacket : &SetupPacket = mem::transmute(self.addr.addr());
+        let setuppacket: &SetupPacket = mem::transmute(self.addr.addr());
         *setuppacket
     }
-
 }
 
 impl Copy for BufferDescriptor_control_data01{}
@@ -173,6 +186,17 @@ impl Clone for BufferDescriptor_control_data01 {
         *self
     }
 }
+
+impl BufferDescriptor_control_data01 {
+    pub fn toggle(&mut self) {
+        use self::BufferDescriptor_control_data01::*;
+        *self = match *self {
+            Data1 => Data0,
+            Data0 => Data1,
+        };
+    }
+}
+
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default)]
