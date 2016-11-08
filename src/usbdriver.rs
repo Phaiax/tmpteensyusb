@@ -38,15 +38,22 @@ enum Ep0Tx {
     /// request the whole length in one step. We panic if
     /// the host does not do so. The packet is owned by
     /// the buffer descriptor.
-    CustomOwnedByBd0(usb::OddEven),
-    /// request
-    SendCustom,
+    CustomOwnedByBd0,
     /// Some fat pointer to static data. This data probably
     /// needs to be sent in multiple steps. We move the
     /// fat pointer along. The `keep` is to
-    Static(&'static [u8]),
-    /// request
+    StaticRemaining(&'static [u8]),
+}
+
+enum Ep0TxAction {
+    /// Please send n bytes from UsbDriver.ep0_tx_buf
+    SendCustom { len: u8 },
+    /// Please send these bytes that point to flash memory
     SendStatic(&'static [u8]),
+    /// Send packet with len 0
+    SendEmpty,
+    /// Do Nothing
+    DoNothing
 }
 
 enum SetOrClear {
@@ -104,22 +111,23 @@ pub struct UsbDriver {
     pool: MemoryPoolRef<[UsbPacket; 32]>,
     fifos: Fifos,
 
-    ep0_rx0_buf: [u8; EP0_SIZE], // __attribute__ ((aligned (4)));
-    ep0_rx1_buf: [u8; EP0_SIZE], // __attribute__ ((aligned (4)));
-    ep0_tx: Ep0Tx, // ep0_tx_len;
-
-    /// A usb packet for transmitting custom data through endpoint 0.
-    /// If this Option is Some(), it signals that the packet is owned
-    /// by this struct and available for use.
-    /// If this Option is None, the packet is currently in use
-    /// and owned by the USB-FS. This is also signalled through
-    /// the CustomOwnedByBd0 option of self.ep0_tx.
-    /// After the transaction has completed the packet must be moved
-    /// to this field again.
-    ep0_tx_custom: Option<AllocatedUsbPacket>,
-    ep0_tx_bdt_bank: usb::OddEven,
-    ep0_next_tx_data01_state: usb::BufferDescriptor_control_data01,
+    ep0_rx0_buf: [u8; EP0_SIZE], // TODO __attribute__ ((aligned (4)));
+    ep0_rx1_buf: [u8; EP0_SIZE], // TODO __attribute__ ((aligned (4)));
     ep0_setuppacket: usb::SetupPacket,
+
+    /// A buffer for transmitting custom data through endpoint 0.
+    /// If self.ep0_tx == CustomOwnedByBd0 then
+    ///    it signals that the buffer is currently in use
+    ///    and owned by the USB-FS.
+    /// Otherwise the buffer is available for use.
+    ep0_tx_buf: [u8 ; 8], // TODO __attribute__ ((aligned (4)));
+
+    /// Current Transfer state of endpoint 0
+    ep0_tx: Ep0Tx,
+    /// Which buffer to use for next chunk on ep0
+    ep0_next_tx_bank: usb::OddEven,
+    /// Data0 or 1 for next chunk on ep0?
+    ep0_next_tx_data01_state: usb::BufferDescriptor_control_data01,
 }
 
 
@@ -144,7 +152,6 @@ impl UsbDriver {
             bd.addr.set_addr(0);
         }
 
-        let packet_for_ep0 = pool.allocate().unwrap();
         let result = UsbDriver {
             usb_configuration: 0,
             usb_reboot_timer: 0,
@@ -155,13 +162,14 @@ impl UsbDriver {
             pool: pool,
             fifos: Fifos::new(),
 
-            ep0_rx0_buf: [0u8; EP0_SIZE], // __attribute__ ((aligned (4)));
-            ep0_rx1_buf: [0u8; EP0_SIZE], // __attribute__ ((aligned (4)));
-            ep0_tx: Ep0Tx::Nothing, // ep0_tx_len;
-            ep0_tx_custom: Some(packet_for_ep0),
-            ep0_tx_bdt_bank: usb::OddEven::Even,
-            ep0_next_tx_data01_state: usb::BufferDescriptor_control_data01::Data0,
+            ep0_rx0_buf: [0u8; EP0_SIZE],
+            ep0_rx1_buf: [0u8; EP0_SIZE],
             ep0_setuppacket: usb::SetupPacket::default(),
+
+            ep0_tx_buf: [0u8 ; 8],
+            ep0_tx: Ep0Tx::Nothing, // ep0_tx_len;
+            ep0_next_tx_bank: usb::OddEven::Even,
+            ep0_next_tx_data01_state: usb::BufferDescriptor_control_data01::Data0,
         };
 
         // this basically follows the flowchart in the Kinetis
@@ -246,7 +254,7 @@ impl UsbDriver {
     }
 
     /// Will be called if a IN, OUT or SETUP transaction happened on endpoint 0
-    pub fn endpoint0_process_transaction(&mut self, last_transaction: Usb_stat_Get) {
+    pub fn endpoint0_process_transaction(&'static mut self, last_transaction: Usb_stat_Get) {
 
         let b = self.get_bufferdescriptor_by_statregister(last_transaction);
 
@@ -298,7 +306,7 @@ impl UsbDriver {
             },
             0x09 => { // IN/Tx transaction completed to host
 
-                self.endpoint0_send_remaining_data(b);
+                self.endpoint0_send_remaining_data();
 
                 // deferred: SET_ADDRESS
                 if self.ep0_setuppacket.request_and_type() == 0x0500 {
@@ -318,16 +326,84 @@ impl UsbDriver {
         USB().ctl.ignoring_state().set_usbensofen(Usb_ctl_usbensofen::EnableUSBModule); // clear TXSUSPENDTOKENBUSY bit
     }
 
-    pub fn endpoint0_clear_all_pending_tx(&mut self) {
-        self.ep0_tx = match self.ep0_tx {
-            Ep0Tx::CustomOwnedByBd0(oddeven) => {
-                let bd = self.get_bufferdescriptor_by_ep(usb::Ep::Ep0, usb::TxRx::Tx, oddeven);
-                // move packet back to parking position.
-                self.ep0_tx_custom = Some(unsafe { bd.swap_usb_packet(None).unwrap() });
-                Ep0Tx::Nothing
+    pub fn endpoint0_transmit(&mut self, buf: &'static [u8]) -> &'static [u8] {
+        let chunksize = self.endpoint0_transmit_ptr(buf.as_ptr(), buf.len());
+        &buf[chunksize..]
+    }
+
+    /// Helper for some unsafe borrowing stuff
+    fn endpoint0_transmit_ptr(&mut self, buf : *const u8, len : usize) -> usize {
+        let chunksize = cmp::min(EP0_SIZE, len);
+        let bd = self.get_bufferdescriptor_by_ep(usb::Ep::Ep0, usb::TxRx::Tx, self.ep0_next_tx_bank);
+
+        bd.addr.ignoring_state().set_addr(buf as u32);
+        bd.control.ignoring_state().give_back(chunksize, self.ep0_next_tx_data01_state);
+
+        self.ep0_next_tx_data01_state.toggle();
+        self.ep0_next_tx_bank.toggle();
+
+        chunksize
+    }
+
+    /// The handlers of endpoint0 setup requests want to send data sometimes.
+    /// They can do so by setting ep_tx0 to SendStatic or SendCustom.
+    fn endpoint0_execute_send_action(&mut self, action : Ep0TxAction)
+    {
+        match action {
+            Ep0TxAction::SendStatic(mut data) => {
+                data = self.endpoint0_transmit(data);
+                if data.len() > 0 {
+                    // put second chunk to second bank (odd/even)
+                    data = self.endpoint0_transmit(data);
+                }
+                if data.len() > 0 {
+                    // third chunk and following
+                    self.ep0_tx = Ep0Tx::StaticRemaining(data);
+                } else {
+                    self.ep0_tx = Ep0Tx::StaticFinishing;
+                }
             }
+            Ep0TxAction::SendCustom { len } => {
+                // There will be no remaining data.
+                let buf = self.ep0_tx_buf.as_ptr();
+                self.endpoint0_transmit_ptr(buf, len as usize);
+                self.ep0_tx = Ep0Tx::CustomOwnedByBd0;
+            }
+            Ep0TxAction::SendEmpty => {
+                self.endpoint0_transmit(&[]);
+                self.ep0_tx = Ep0Tx::StaticFinishing;
+            }
+            _ => { }
+        }
+    }
+
+    /// Should be called whenever a IN transaction on Ep0 has been completed.
+    /// This then copies the next chunk of data into the ep0 transmit buffer.
+    fn endpoint0_send_remaining_data(&mut self)
+    {
+        // send remaining data, if any...
+        self.ep0_tx = match self.ep0_tx {
+            // remaining slice of data that needs to be pushed into buffers step by step
+            Ep0Tx::StaticRemaining(data) => {
+                let remaining = self.endpoint0_transmit(data);
+                if remaining.len() == 0 {
+                    // last chunk has been copied into buffer, but expect one more IN transaction
+                    Ep0Tx::StaticFinishing
+                } else {
+                    Ep0Tx::StaticRemaining(remaining)
+                }
+            }
+            // The last bit of static data has arrived at the host (is that true? may the other of
+            // the odd/even buffers hold still data? in fact it doesnt matter.)
+            Ep0Tx::StaticFinishing => Ep0Tx::Nothing,
+            // If custom data is sent, there will be no second part.
+            Ep0Tx::CustomOwnedByBd0 => Ep0Tx::Nothing,
             _ => Ep0Tx::Nothing,
         };
+    }
+
+    pub fn endpoint0_clear_all_pending_tx(&mut self) {
+        self.ep0_tx = Ep0Tx::Nothing;
 
         self.get_bufferdescriptor_by_ep(usb::Ep::Ep0, usb::TxRx::Tx, usb::OddEven::Even)
             .control
@@ -340,92 +416,6 @@ impl UsbDriver {
             .zero_all();
     }
 
-    pub fn endpoint0_transmit_s(&mut self, buf: &'static [u8]) -> &'static [u8] {
-        let chunksize = cmp::min(EP0_SIZE, buf.len());
-        let bd = self.get_bufferdescriptor_by_ep(usb::Ep::Ep0, usb::TxRx::Tx, self.ep0_tx_bdt_bank);
-
-        bd.addr.ignoring_state().set_addr(buf.as_ptr() as u32);
-        bd.control.ignoring_state().give_back(chunksize, self.ep0_next_tx_data01_state);
-
-        self.ep0_next_tx_data01_state.toggle();
-        self.ep0_tx_bdt_bank.toggle();
-
-        &buf[chunksize..]
-    }
-
-    pub fn endpoint0_transmit_c(&mut self, buf: AllocatedUsbPacket) -> usb::OddEven {
-        let len = buf.buf().len();
-        let bd = self.get_bufferdescriptor_by_ep(usb::Ep::Ep0, usb::TxRx::Tx, self.ep0_tx_bdt_bank);
-        bd.swap_usb_packet(Some(buf));
-        bd.control.ignoring_state().give_back(len, self.ep0_next_tx_data01_state);
-
-        let used_bank = self.ep0_tx_bdt_bank;
-
-        self.ep0_next_tx_data01_state.toggle();
-        self.ep0_tx_bdt_bank.toggle();
-
-        used_bank
-    }
-
-    /// The handlers of endpoint0 setup requests want to send data sometimes.
-    /// They can do so by setting ep_tx0 to SendStatic or SendCustom.
-    fn endpoint0_execute_send_action(&mut self)
-    {
-        match self.ep0_tx {
-            Ep0Tx::SendStatic(mut data) => {
-                data = self.endpoint0_transmit_s(data);
-                if data.len() > 0 {
-                    // put second chunk to second bank (odd/even)
-                    data = self.endpoint0_transmit_s(data);
-                }
-                if data.len() > 0 {
-                    self.ep0_tx = Ep0Tx::SendStatic(data);
-                } else {
-                    self.ep0_tx = Ep0Tx::StaticFinishing;
-                }
-            }
-            Ep0Tx::SendCustom => {
-                // -!!! info!("usb setup : snd custom");
-                let p = self.ep0_tx_custom.take().unwrap();
-                let bank = self.endpoint0_transmit_c(p);
-                self.ep0_tx = Ep0Tx::CustomOwnedByBd0(bank);
-            }
-            _ => { assert!(false); }
-        }
-    }
-
-    /// Should be called whenever a IN transaction on Ep0 has been completed.
-    /// This then copies the next chunk of data into the ep0 transmit buffer.
-    fn endpoint0_send_remaining_data(&mut self, b : &usb::BufferDescriptor)
-    {
-        // send remaining data, if any...
-        self.ep0_tx = match self.ep0_tx {
-            // remaining slice of data that needs to be pushed into buffers step by step
-            Ep0Tx::Static(data) => {
-                let remaining = self.endpoint0_transmit_s(data);
-                if remaining.len() == 0 {
-                    // last chunk has been copied into buffer, but expect one more IN transaction
-                    Ep0Tx::StaticFinishing
-                } else {
-                    Ep0Tx::Static(remaining)
-                }
-            }
-            // The last bit of static data has arrived at the host
-            Ep0Tx::StaticFinishing => Ep0Tx::Nothing,
-            // If custom data is sent, there will be no second part. So move the packet
-            // ownership back to self.ep0_tx_custom aka its parking position
-            Ep0Tx::CustomOwnedByBd0(oddeven) => {
-                // sanity check (can be omitted i guess)
-                let bd2 = self.get_bufferdescriptor_by_ep(usb::Ep::Ep0, usb::TxRx::Tx, oddeven);
-                assert_eq!(bd2 as *const usb::BufferDescriptor,
-                           b as *const usb::BufferDescriptor);
-                self.ep0_tx_custom = Some(unsafe { b.swap_usb_packet(None).unwrap() });
-                Ep0Tx::Nothing
-            }
-            _ => Ep0Tx::Nothing,
-        };
-    }
-
     pub fn endpoint0_stall() {
         USB().endpt[0]
             .endpt
@@ -436,52 +426,51 @@ impl UsbDriver {
             .set_ephshk(Usb_endpt_endpt_ephshk::Handshake);
     }
 
-    pub fn endpoint0_process_setup_transaction(&mut self) -> Result<(), &'static str> {
-        match self.ep0_setuppacket.request_and_type() {
+    pub fn endpoint0_process_setup_transaction(&'static mut self) -> Result<(), &'static str> {
+        let action = match self.ep0_setuppacket.request_and_type() {
             0x0500 => { // SET_ADDRESS (do nothing here, defer until IN is completed)
                 // But make a IN transaction with a len of 0
-                self.ep0_tx = Ep0Tx::SendStatic(&generated::DEVICEDESCRIPTOR[0..0]);
+                Ep0TxAction::SendStatic(&generated::DEVICEDESCRIPTOR[0..0])
             }
             0x0900 => { // SET_CONFIGURATION
-                try!(self.endpoint0_process_set_configuration());
+                try!(self.endpoint0_process_set_configuration())
             }
             0x0880 => { // GET_CONFIGURATION
-                self.ep0_tx_custom.as_mut().unwrap().buf_mut(1)[0] = self.usb_configuration;
-                self.ep0_tx = Ep0Tx::SendCustom;
+                self.ep0_tx_buf[0] = self.usb_configuration;
+                Ep0TxAction::SendCustom { len : 1 }
             }
             0x0080 => { // GET_STATUS (device)
-                let buf = self.ep0_tx_custom.as_mut().unwrap().buf_mut(2);
-                buf[0] = 0;
-                buf[1] = 0;
-                self.ep0_tx = Ep0Tx::SendCustom;
+                self.ep0_tx_buf[0] = 0;
+                self.ep0_tx_buf[1] = 0;
+                Ep0TxAction::SendCustom { len : 2 }
             }
             0x0082 => { // GET_STATUS (endpoint)
-                try!(self.endpoint0_process_get_status_of_endpoint());
+                try!(self.endpoint0_process_get_status_of_endpoint())
             }
             0x0102 => { // CLEAR_FEATURE (endpoint)
-                try!(self.endpoint0_process_set_and_clear_feature_of_endpoint(SetOrClear::Clear));
+                try!(self.endpoint0_process_set_and_clear_feature_of_endpoint(SetOrClear::Clear))
              }
             0x0302 => { // SET_FEATURE (endpoint)
-                try!(self.endpoint0_process_set_and_clear_feature_of_endpoint(SetOrClear::Set));
+                try!(self.endpoint0_process_set_and_clear_feature_of_endpoint(SetOrClear::Set))
             }
             0x0680 | 0x0681 => { // GET_DESCRIPTOR (0x0680 calls on device level, 0x0681 on interface level)
                 // Normally 0x0681 should never happen, but I guess there is a misbehaving host somewhere in the wild
-                try!(self.endpoint0_process_get_descriptor());
+                try!(self.endpoint0_process_get_descriptor())
             }
             _ => {
                 return Err("usb setup UNKNOWN");
             }
-        } // match req and type
+        };
 
         // CC  if (datalen > setup.wLength) datalen = setup.wLength;
 
-        self.endpoint0_execute_send_action();
+        self.endpoint0_execute_send_action(action);
 
         Ok(())
     }
 
     /// Prepare everything for the chosen configuration
-    fn endpoint0_process_set_configuration(&mut self) -> Result<(), &'static str> {
+    fn endpoint0_process_set_configuration(&mut self) -> Result<Ep0TxAction, &'static str> {
         info!("usb setup set config {}", self.ep0_setuppacket.wValue());
 
         self.usb_configuration = self.ep0_setuppacket.wValue() as u8;
@@ -562,26 +551,24 @@ impl UsbDriver {
                 .ignoring_state()
                 .zero_all();
         } // end for
-        self.ep0_tx = Ep0Tx::SendStatic(&generated::DEVICEDESCRIPTOR[0..0]);
-        Ok(())
+
+        Ok((Ep0TxAction::SendEmpty))
     }
 
-    fn endpoint0_process_get_status_of_endpoint(&mut self) -> Result<(), &'static str> {
+    fn endpoint0_process_get_status_of_endpoint(&mut self) -> Result<Ep0TxAction, &'static str> {
         let endpoint_nr = self.ep0_setuppacket.wIndex() as usize;
         if endpoint_nr > 16 {
             return Err("illegal endpt");
         }
-        let buf = self.ep0_tx_custom.as_mut().unwrap().buf_mut(2);
-        buf[0] = match USB().endpt[endpoint_nr].endpt.epstall() {
+        self.ep0_tx_buf[0] = match USB().endpt[endpoint_nr].endpt.epstall() {
             Usb_endpt_endpt_epstall::Stalled => 1,
             Usb_endpt_endpt_epstall::NotStalled => 0,
         };
-        buf[1] = 0;
-        self.ep0_tx = Ep0Tx::SendCustom;
-        Ok(())
+        self.ep0_tx_buf[1] = 0;
+        Ok(Ep0TxAction::SendCustom { len : 2 })
     }
 
-    fn endpoint0_process_set_and_clear_feature_of_endpoint(&mut self, action : SetOrClear) -> Result<(), &'static str> {
+    fn endpoint0_process_set_and_clear_feature_of_endpoint(&mut self, action : SetOrClear) -> Result<Ep0TxAction, &'static str> {
         // there is only one feature available for any endpoint: ENDPOINT_HALT <=> wValue=0
         let endpoint_nr = self.ep0_setuppacket.wIndex() as usize;
         if endpoint_nr > 16 || self.ep0_setuppacket.wValue() != 0 {
@@ -596,11 +583,10 @@ impl UsbDriver {
         USB().endpt[endpoint_nr].endpt.set_epstall(new_state);
 
         // CC    // TODO: do we need to clear the data toggle here?
-        self.ep0_tx = Ep0Tx::SendStatic(&generated::DEVICEDESCRIPTOR[0..0]);
-        Ok(())
+        Ok((Ep0TxAction::SendEmpty))
     }
 
-    fn endpoint0_process_get_descriptor(&mut self) -> Result<(), &'static str>  {
+    fn endpoint0_process_get_descriptor(&mut self) -> Result<Ep0TxAction, &'static str>  {
         let descr_type = (self.ep0_setuppacket.wValue() >> 8) as u8;
         let mut data: &'static [u8] = match descr_type {
             1 => {
@@ -621,8 +607,7 @@ impl UsbDriver {
         if data.len() > requested_len {
             data = &data[0..requested_len];
         }
-        self.ep0_tx = Ep0Tx::SendStatic(data);
-        Ok(())
+        Ok(Ep0TxAction::SendStatic(data))
     }
 
 
@@ -630,7 +615,7 @@ impl UsbDriver {
         // initialize BDT toggle bits
         USB().ctl.ignoring_state().set_oddrst(true);
         let drv = generated::driver_ref().0;
-        drv.ep0_tx_bdt_bank = usb::OddEven::Even;
+        drv.ep0_next_tx_bank = usb::OddEven::Even;
 
         // set up buffers to receive Setup and OUT packets
         self.get_bufferdescriptor_by_ep(usb::Ep::Ep0, usb::TxRx::Rx, usb::OddEven::Even)
