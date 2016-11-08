@@ -53,12 +53,12 @@ enum Ep0TxAction {
     /// Send packet with len 0
     SendEmpty,
     /// Do Nothing
-    DoNothing
+    DoNothing,
 }
 
 enum SetOrClear {
     Set,
-    Clear
+    Clear,
 }
 
 /// This struct helps with the lazy initialization of a `'static` usb driver so that the isr can access it.
@@ -120,7 +120,7 @@ pub struct UsbDriver {
     ///    it signals that the buffer is currently in use
     ///    and owned by the USB-FS.
     /// Otherwise the buffer is available for use.
-    ep0_tx_buf: [u8 ; 8], // TODO __attribute__ ((aligned (4)));
+    ep0_tx_buf: [u8; 8], // TODO __attribute__ ((aligned (4)));
 
     /// Current Transfer state of endpoint 0
     ep0_tx: Ep0Tx,
@@ -166,7 +166,7 @@ impl UsbDriver {
             ep0_rx1_buf: [0u8; EP0_SIZE],
             ep0_setuppacket: usb::SetupPacket::default(),
 
-            ep0_tx_buf: [0u8 ; 8],
+            ep0_tx_buf: [0u8; 8],
             ep0_tx: Ep0Tx::Nothing, // ep0_tx_len;
             ep0_next_tx_bank: usb::OddEven::Even,
             ep0_next_tx_data01_state: usb::BufferDescriptor_control_data01::Data0,
@@ -228,27 +228,29 @@ impl UsbDriver {
     }
 
     fn get_bufferdescriptor_by_epnr(&self,
-                 ep: usize,
-                 txrx: usb::TxRx,
-                 odd: usb::OddEven)
-                 -> &'static usb::BufferDescriptor {
-        self.get_bufferdescriptor_by_id( (ep << 2) | txrx as usize | odd as usize )
+                                    ep: usize,
+                                    txrx: usb::TxRx,
+                                    odd: usb::OddEven)
+                                    -> &'static usb::BufferDescriptor {
+        self.get_bufferdescriptor_by_id((ep << 2) | txrx as usize | odd as usize)
     }
 
     fn get_bufferdescriptor_by_ep(&self,
-              ep: usb::Ep,
-              txrx: usb::TxRx,
-              odd: usb::OddEven)
-              -> &'static usb::BufferDescriptor {
-        self.get_bufferdescriptor_by_id( (ep as usize) | txrx as usize | odd as usize )
+                                  ep: usb::Ep,
+                                  txrx: usb::TxRx,
+                                  odd: usb::OddEven)
+                                  -> &'static usb::BufferDescriptor {
+        self.get_bufferdescriptor_by_id((ep as usize) | txrx as usize | odd as usize)
     }
 
-    fn get_bufferdescriptor_by_statregister(&self, stat : Usb_stat_Get) -> &'static usb::BufferDescriptor {
+    fn get_bufferdescriptor_by_statregister(&self,
+                                            stat: Usb_stat_Get)
+                                            -> &'static usb::BufferDescriptor {
         // stat: [ 7..4 endp, 3 txrx, 2 odd, 1..0 _]
         self.get_bufferdescriptor_by_id((stat.raw() >> 2) as usize)
     }
 
-    fn get_bufferdescriptor_by_id(&self, bufferdescr_id : usize) -> &'static usb::BufferDescriptor {
+    fn get_bufferdescriptor_by_id(&self, bufferdescr_id: usize) -> &'static usb::BufferDescriptor {
         assert!(bufferdescr_id < generated::NUM_BUFFERDESCRIPTORS);
         &generated::BufferDescriptors()[bufferdescr_id]
     }
@@ -260,7 +262,8 @@ impl UsbDriver {
 
         let pid = b.control.pid_tok();
         match pid {
-            0x0D => { // SETUP transaction from host
+            0x0D => {
+                // SETUP transaction from host
                 // copy buffer content
                 self.ep0_setuppacket = unsafe { b.interpret_buf_as_setup_packet() };
 
@@ -279,8 +282,9 @@ impl UsbDriver {
                     info!("{}", e);
                     Self::endpoint0_stall();
                 });
-            },
-            0x01 | 0x02 => { // OUT/Rx transaction received from host
+            }
+            0x01 | 0x02 => {
+                // OUT/Rx transaction received from host
                 info!("usb control PID=OUT {}, r&t {:x}",
                       pid,
                       self.ep0_setuppacket.request_and_type());
@@ -303,8 +307,9 @@ impl UsbDriver {
                 b.control
                     .ignoring_state()
                     .give_back(EP0_SIZE, usb::BufferDescriptor_control_data01::Data1);
-            },
-            0x09 => { // IN/Tx transaction completed to host
+            }
+            0x09 => {
+                // IN/Tx transaction completed to host
 
                 self.endpoint0_send_remaining_data();
 
@@ -316,7 +321,7 @@ impl UsbDriver {
                         .set_addr(self.ep0_setuppacket.wValue() as u8)
                         .set_lsen(Usb_addr_lsen::RegularSpeed);
                 }
-            },
+            }
             _ => {
                 info!("usb control. PID unknown");
             }
@@ -332,9 +337,10 @@ impl UsbDriver {
     }
 
     /// Helper for some unsafe borrowing stuff
-    fn endpoint0_transmit_ptr(&mut self, buf : *const u8, len : usize) -> usize {
+    fn endpoint0_transmit_ptr(&mut self, buf: *const u8, len: usize) -> usize {
         let chunksize = cmp::min(EP0_SIZE, len);
-        let bd = self.get_bufferdescriptor_by_ep(usb::Ep::Ep0, usb::TxRx::Tx, self.ep0_next_tx_bank);
+        let bd =
+            self.get_bufferdescriptor_by_ep(usb::Ep::Ep0, usb::TxRx::Tx, self.ep0_next_tx_bank);
 
         bd.addr.ignoring_state().set_addr(buf as u32);
         bd.control.ignoring_state().give_back(chunksize, self.ep0_next_tx_data01_state);
@@ -347,8 +353,7 @@ impl UsbDriver {
 
     /// The handlers of endpoint0 setup requests want to send data sometimes.
     /// They can do so by setting ep_tx0 to SendStatic or SendCustom.
-    fn endpoint0_execute_send_action(&mut self, action : Ep0TxAction)
-    {
+    fn endpoint0_execute_send_action(&mut self, action: Ep0TxAction) {
         match action {
             Ep0TxAction::SendStatic(mut data) => {
                 data = self.endpoint0_transmit(data);
@@ -373,14 +378,13 @@ impl UsbDriver {
                 self.endpoint0_transmit(&[]);
                 self.ep0_tx = Ep0Tx::StaticFinishing;
             }
-            _ => { }
+            _ => {}
         }
     }
 
     /// Should be called whenever a IN transaction on Ep0 has been completed.
     /// This then copies the next chunk of data into the ep0 transmit buffer.
-    fn endpoint0_send_remaining_data(&mut self)
-    {
+    fn endpoint0_send_remaining_data(&mut self) {
         // send remaining data, if any...
         self.ep0_tx = match self.ep0_tx {
             // remaining slice of data that needs to be pushed into buffers step by step
@@ -428,32 +432,40 @@ impl UsbDriver {
 
     pub fn endpoint0_process_setup_transaction(&'static mut self) -> Result<(), &'static str> {
         let action = match self.ep0_setuppacket.request_and_type() {
-            0x0500 => { // SET_ADDRESS (do nothing here, defer until IN is completed)
+            0x0500 => {
+                // SET_ADDRESS (do nothing here, defer until IN is completed)
                 // But make a IN transaction with a len of 0
-                Ep0TxAction::SendStatic(&generated::DEVICEDESCRIPTOR[0..0])
+                Ep0TxAction::SendEmpty
             }
-            0x0900 => { // SET_CONFIGURATION
+            0x0900 => {
+                // SET_CONFIGURATION
                 try!(self.endpoint0_process_set_configuration())
             }
-            0x0880 => { // GET_CONFIGURATION
+            0x0880 => {
+                // GET_CONFIGURATION
                 self.ep0_tx_buf[0] = self.usb_configuration;
-                Ep0TxAction::SendCustom { len : 1 }
+                Ep0TxAction::SendCustom { len: 1 }
             }
-            0x0080 => { // GET_STATUS (device)
+            0x0080 => {
+                // GET_STATUS (device)
                 self.ep0_tx_buf[0] = 0;
                 self.ep0_tx_buf[1] = 0;
-                Ep0TxAction::SendCustom { len : 2 }
+                Ep0TxAction::SendCustom { len: 2 }
             }
-            0x0082 => { // GET_STATUS (endpoint)
+            0x0082 => {
+                // GET_STATUS (endpoint)
                 try!(self.endpoint0_process_get_status_of_endpoint())
             }
-            0x0102 => { // CLEAR_FEATURE (endpoint)
+            0x0102 => {
+                // CLEAR_FEATURE (endpoint)
                 try!(self.endpoint0_process_set_and_clear_feature_of_endpoint(SetOrClear::Clear))
-             }
-            0x0302 => { // SET_FEATURE (endpoint)
+            }
+            0x0302 => {
+                // SET_FEATURE (endpoint)
                 try!(self.endpoint0_process_set_and_clear_feature_of_endpoint(SetOrClear::Set))
             }
-            0x0680 | 0x0681 => { // GET_DESCRIPTOR (0x0680 calls on device level, 0x0681 on interface level)
+            0x0680 | 0x0681 => {
+                // GET_DESCRIPTOR (0x0680 calls on device level, 0x0681 on interface level)
                 // Normally 0x0681 should never happen, but I guess there is a misbehaving host somewhere in the wild
                 try!(self.endpoint0_process_get_descriptor())
             }
@@ -565,10 +577,12 @@ impl UsbDriver {
             Usb_endpt_endpt_epstall::NotStalled => 0,
         };
         self.ep0_tx_buf[1] = 0;
-        Ok(Ep0TxAction::SendCustom { len : 2 })
+        Ok(Ep0TxAction::SendCustom { len: 2 })
     }
 
-    fn endpoint0_process_set_and_clear_feature_of_endpoint(&mut self, action : SetOrClear) -> Result<Ep0TxAction, &'static str> {
+    fn endpoint0_process_set_and_clear_feature_of_endpoint(&mut self,
+                                                           action: SetOrClear)
+                                                           -> Result<Ep0TxAction, &'static str> {
         // there is only one feature available for any endpoint: ENDPOINT_HALT <=> wValue=0
         let endpoint_nr = self.ep0_setuppacket.wIndex() as usize;
         if endpoint_nr > 16 || self.ep0_setuppacket.wValue() != 0 {
@@ -576,7 +590,7 @@ impl UsbDriver {
         }
 
         let new_state = match action {
-            SetOrClear::Set =>  Usb_endpt_endpt_epstall::Stalled,
+            SetOrClear::Set => Usb_endpt_endpt_epstall::Stalled,
             SetOrClear::Clear => Usb_endpt_endpt_epstall::NotStalled,
         };
 
@@ -586,20 +600,18 @@ impl UsbDriver {
         Ok((Ep0TxAction::SendEmpty))
     }
 
-    fn endpoint0_process_get_descriptor(&mut self) -> Result<Ep0TxAction, &'static str>  {
+    fn endpoint0_process_get_descriptor(&mut self) -> Result<Ep0TxAction, &'static str> {
         let descr_type = (self.ep0_setuppacket.wValue() >> 8) as u8;
         let mut data: &'static [u8] = match descr_type {
-            1 => {
-                generated::DEVICEDESCRIPTOR
-            }
-            2 => {
-                generated::CONFIGDESCRIPTORTREE
-            }
-            3 => { // String Descriptor
+            1 => generated::DEVICEDESCRIPTOR,
+            2 => generated::CONFIGDESCRIPTORTREE,
+            3 => {
+                // String Descriptor
                 let index = self.ep0_setuppacket.wValue() as u8;
                 generated::get_str(index)
             }
-            _ => { // not found
+            _ => {
+                // not found
                 return Err("descriptor not found");
             }
         };
