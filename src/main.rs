@@ -3,12 +3,9 @@
 #![plugin(ioreg)]
 #![no_std]
 
-#[macro_use]
-pub extern crate zinc;
-
+#[macro_use] pub extern crate zinc;
 #[macro_use] #[no_link] extern crate ioreg;
 #[macro_use] extern crate volatile_cell;
-
 
 pub mod generated;
 //pub use generated2 as generated;
@@ -17,6 +14,7 @@ pub mod usbmempool;
 #[macro_use]
 pub mod usbmem;
 pub mod usbdriver;
+pub mod usbserial;
 // mod test;
 
 pub use core as c;
@@ -36,8 +34,7 @@ use zinc::hal::uart::Parity;
 use zinc::drivers::chario::CharIO;
 use core::fmt::Write;
 
-use usbdriver::{UsbDriver, UsbDriverRef, UsbDriverOption};
-use usbmempool::{MemoryPoolOption, MemoryPoolRef, MemoryPool, AllocatedUsbPacket, UsbPacket, MemoryPoolTrait};
+use usbmempool::{MemoryPool, AllocatedUsbPacket, UsbPacket, MemoryPoolTrait};
 use usbmem::{Fifos, Ep};
 
 /// Wait the given number of SysTick ticks
@@ -56,10 +53,15 @@ pub fn wait(ticks: u32) {
   }
 }
 
-static mut POOL : MemoryPoolOption<[UsbPacket; 32]> = MemoryPoolOption::none();
-fn pool_ref() -> MemoryPoolRef<[UsbPacket; 32]> {
-  unsafe { POOL.unwrap() }
+static mut POOL : Option<MemoryPool<[UsbPacket; 32]>> = None;
+pub fn pool_ref() -> &'static MemoryPool<[UsbPacket; 32]> {
+    let r = unsafe { &mut POOL };
+    if r.is_none() {
+        *r = Some(MemoryPool::new());
+    }
+    &r.as_ref().unwrap()
 }
+
 
 
 pub fn main() {
@@ -77,9 +79,8 @@ pub fn main() {
   wait(500);
 
 
-  unsafe { POOL.init(); };
-  unsafe { generated::USBDRIVER.init(pool_ref()); };
-  let pool = pool_ref();
+  let pool = pool_ref(); // init
+  generated::usb_ref(); // init
 
 
   // let usb1 = USB().clone();

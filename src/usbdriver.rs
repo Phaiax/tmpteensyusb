@@ -1,18 +1,20 @@
 
 use zinc::hal::k20::regs::*;
-use usbmempool::{MemoryPoolRef, UsbPacket, AllocatedUsbPacket, MemoryPoolTrait};
+use usbmempool::{MemoryPool, UsbPacket, AllocatedUsbPacket, MemoryPoolTrait};
 use usbmem::Fifos;
 use usb;
 use generated;
 use zinc;
 use core::cmp;
+use core::cell::UnsafeCell;
+
 // use usbmem;
 
 // use usbmem::{Fifos, Ep};
 // use usbmem::{ForEnqueue};
-use core::mem::drop;
+use core::mem::{drop, transmute};
+use core::ptr;
 use zinc::hal::cortex_m4::irq::NoInterrupts;
-
 
 pub const EP0_SIZE: usize = 64;
 
@@ -46,7 +48,7 @@ enum Ep0Tx {
 }
 
 enum Ep0TxAction {
-    /// Please send n bytes from UsbDriver.ep0_tx_buf
+    /// Please send n bytes from UsbDriver.ep0data.tx_buf
     SendCustom { len: u8 },
     /// Please send these bytes that point to flash memory
     SendStatic(&'static [u8]),
@@ -61,115 +63,101 @@ enum SetOrClear {
     Clear,
 }
 
-/// This struct helps with the lazy initialization of a `'static` usb driver so that the isr can access it.
-pub struct UsbDriverOption(Option<UsbDriver>);
-
-impl UsbDriverOption {
-    /// Const function to allow definition of `static mut USBDRIVER`. The USBDRIVER needs to be initialized.
-    pub const fn none() -> UsbDriverOption {
-        UsbDriverOption(None)
-    }
-    /// Initialize self, that means transition from `None` to `Some`. Afterwards calls to `unwrap` are possible.
-    pub fn init(&mut self, pool: MemoryPoolRef<[UsbPacket; 32]>) {
-        match self.0 {
-            None => {
-                *self = UsbDriverOption(Some(UsbDriver::new(pool)));
-            }
-            Some(_) => {
-                panic!();
-            }
-        }
-    }
-    /// Get a reference to the UsbDriver. Panics if not initialized.
-    pub fn unwrap(&'static mut self) -> UsbDriverRef {
-        match self.0 {
-            Some(ref mut p) => UsbDriverRef(p),
-            None => {
-                panic!("Call UsbDriverOption::init() first");
-            }
-        }
-    }
-}
-
-
-
-/// This type wraps a `'static` driver. We must only allocate `'static`
-/// memory because the interrupt service routine needs to find the driver struct.
-///
-/// Also the only way to get this type is by using a `UsbDriverOption`.
-pub struct UsbDriverRef(&'static mut UsbDriver);
-
 
 pub struct UsbDriver {
+
+    devicedescriptor : &'static [u8],
+    configdescriptortree : &'static [u8],
+    get_str : fn(u8) -> &'static [u8],
+    max_endpoint_addr : u8,
+    bufferdescriptors : &'static mut [usb::BufferDescriptor],
+    endpointconfig_for_registers : &'static [u8],
+
+    state : UnsafeCell<UsbDriverState>,
+
+    pool: &'static MemoryPool<[UsbPacket; 32]>,
+    fifos: Fifos,
+
+    ep0data : UnsafeCell<Endpoint0Data>,
+}
+
+struct UsbDriverState {
     /// Selected configuration id (by host via SET_CONFIGURATION)
     usb_configuration: u8,
     usb_reboot_timer: u8,
     /// ?
     usb_rx_byte_count_data: [u16; 16], // [;NUM_ENDPOINTS]
     tx_state: [TxState; 16],
+}
 
-    pool: MemoryPoolRef<[UsbPacket; 32]>,
-    fifos: Fifos,
-
-    ep0_rx0_buf: [u8; EP0_SIZE], // TODO __attribute__ ((aligned (4)));
-    ep0_rx1_buf: [u8; EP0_SIZE], // TODO __attribute__ ((aligned (4)));
-    ep0_setuppacket: usb::SetupPacket,
+struct Endpoint0Data {
+    rx0_buf: [u8; EP0_SIZE], // TODO __attribute__ ((aligned (4)));
+    rx1_buf: [u8; EP0_SIZE], // TODO __attribute__ ((aligned (4)));
+    setuppacket: usb::SetupPacket,
 
     /// A buffer for transmitting custom data through endpoint 0.
-    /// If self.ep0_tx == CustomOwnedByBd0 then
+    /// If self.tx_state == CustomOwnedByBd0 then
     ///    it signals that the buffer is currently in use
     ///    and owned by the USB-FS.
     /// Otherwise the buffer is available for use.
-    ep0_tx_buf: [u8; 8], // TODO __attribute__ ((aligned (4)));
+    tx_buf: [u8; 8], // TODO __attribute__ ((aligned (4)));
 
     /// Current Transfer state of endpoint 0
-    ep0_tx: Ep0Tx,
+    tx_state: Ep0Tx,
     /// Which buffer to use for next chunk on ep0
-    ep0_next_tx_bank: usb::OddEven,
+    next_tx_bank: usb::OddEven,
     /// Data0 or 1 for next chunk on ep0?
-    ep0_next_tx_data01_state: usb::BufferDescriptor_control_data01,
+    next_tx_data01_state: usb::BufferDescriptor_control_data01,
 }
 
 
-struct UsbSerial {
-  //  #ifdef CDC_DATA_INTERFACE
-  //extern uint32_t usb_cdc_line_coding[2];
-  //extern volatile uint32_t usb_cdc_line_rtsdtr_millis;
-  //extern volatile uint32_t systick_millis_count;
-  //extern volatile uint8_t usb_cdc_line_rtsdtr;
-  //extern volatile uint8_t usb_cdc_transmit_flush_timer;
-  //extern void usb_serial_flush_callback(void);
-  //#endif
 
-}
-
-use core::ptr;
 impl UsbDriver {
-    pub fn new(pool: MemoryPoolRef<[UsbPacket; 32]>) -> UsbDriver {
+
+    pub fn new(pool: &'static MemoryPool<[UsbPacket; 32]>,
+               devicedescriptor : &'static [u8],
+               configdescriptortree : &'static [u8],
+               get_str : fn(u8) -> &'static [u8],
+               bufferdescriptors : &'static mut [usb::BufferDescriptor],
+               endpointconfig_for_registers : &'static [u8]) -> UsbDriver {
         info!("usb init");
-        for bd in generated::BufferDescriptors().iter_mut() {
+
+        assert!(bufferdescriptors.len() % 4 == 0);
+
+        for bd in bufferdescriptors.iter_mut() {
             bd.control.ignoring_state().zero_all();
             bd.addr.set_addr(0);
         }
 
         let result = UsbDriver {
-            usb_configuration: 0,
-            usb_reboot_timer: 0,
+            devicedescriptor : devicedescriptor,
+            configdescriptortree : configdescriptortree,
+            get_str : get_str,
+            max_endpoint_addr : bufferdescriptors.len() as u8 / 4 - 1,
+            bufferdescriptors : bufferdescriptors,
+            endpointconfig_for_registers : endpointconfig_for_registers,
 
-            usb_rx_byte_count_data: [0u16; 16], // [;NUM_ENDPOINTS]
-            tx_state: [TxState::BothFreeEvenFirst; 16],
+            state : UnsafeCell::new(UsbDriverState {
+                usb_configuration: 0,
+                usb_reboot_timer: 0,
+
+                usb_rx_byte_count_data: [0u16; 16], // [;NUM_ENDPOINTS] TODO via associated const?
+                tx_state: [TxState::BothFreeEvenFirst; 16],
+            }),
 
             pool: pool,
             fifos: Fifos::new(),
 
-            ep0_rx0_buf: [0u8; EP0_SIZE],
-            ep0_rx1_buf: [0u8; EP0_SIZE],
-            ep0_setuppacket: usb::SetupPacket::default(),
+            ep0data : UnsafeCell::new(Endpoint0Data {
+                rx0_buf: [0u8; EP0_SIZE],
+                rx1_buf: [0u8; EP0_SIZE],
+                setuppacket: usb::SetupPacket::default(),
 
-            ep0_tx_buf: [0u8; 8],
-            ep0_tx: Ep0Tx::Nothing, // ep0_tx_len;
-            ep0_next_tx_bank: usb::OddEven::Even,
-            ep0_next_tx_data01_state: usb::BufferDescriptor_control_data01::Data0,
+                tx_buf: [0u8; 8],
+                tx_state: Ep0Tx::Nothing,
+                next_tx_bank: usb::OddEven::Even,
+                next_tx_data01_state: usb::BufferDescriptor_control_data01::Data0,
+            }),
         };
 
         // this basically follows the flowchart in the Kinetis
@@ -189,7 +177,7 @@ impl UsbDriver {
         // while USB().usbtrc0.usbreset() == true {}
 
         // set desc table base addr
-        let buffertableaddr = &generated::BufferDescriptors()[0] as *const _ as usize;
+        let buffertableaddr = &result.bufferdescriptors[0] as *const _ as usize;
         USB().bdtpage1.set_bdtba((buffertableaddr >> 8) as u8);
         USB().bdtpage2.set_bdtba((buffertableaddr >> 16) as u8);
         USB().bdtpage3.set_bdtba((buffertableaddr >> 24) as u8);
@@ -227,7 +215,17 @@ impl UsbDriver {
         result
     }
 
-    fn get_bufferdescriptor_by_epnr(&self,
+    /// open unsafe cell
+    fn ep0data(&'static self) -> &'static mut Endpoint0Data {
+        unsafe { transmute(self.ep0data.get()) }
+    }
+
+    /// open unsafe cell
+    fn state(&'static self) -> &'static mut UsbDriverState {
+        unsafe { transmute(self.state.get()) }
+    }
+
+    fn get_bufferdescriptor_by_epnr(&'static self,
                                     ep: usize,
                                     txrx: usb::TxRx,
                                     odd: usb::OddEven)
@@ -235,7 +233,7 @@ impl UsbDriver {
         self.get_bufferdescriptor_by_id((ep << 2) | txrx as usize | odd as usize)
     }
 
-    fn get_bufferdescriptor_by_ep(&self,
+    fn get_bufferdescriptor_by_ep(&'static self,
                                   ep: usb::Ep,
                                   txrx: usb::TxRx,
                                   odd: usb::OddEven)
@@ -243,21 +241,27 @@ impl UsbDriver {
         self.get_bufferdescriptor_by_id((ep as usize) | txrx as usize | odd as usize)
     }
 
-    fn get_bufferdescriptor_by_statregister(&self,
+    fn get_bufferdescriptor_by_statregister(&'static self,
                                             stat: Usb_stat_Get)
                                             -> &'static usb::BufferDescriptor {
         // stat: [ 7..4 endp, 3 txrx, 2 odd, 1..0 _]
         self.get_bufferdescriptor_by_id((stat.raw() >> 2) as usize)
     }
 
-    fn get_bufferdescriptor_by_id(&self, bufferdescr_id: usize) -> &'static usb::BufferDescriptor {
-        assert!(bufferdescr_id < generated::NUM_BUFFERDESCRIPTORS);
-        &generated::BufferDescriptors()[bufferdescr_id]
+    fn get_bufferdescriptor_by_id(&'static self, bufferdescr_id: usize) -> &'static usb::BufferDescriptor {
+        if bufferdescr_id >= self.bufferdescriptors.len() {
+            info!("maxep {}", self.max_endpoint_addr);
+            info!("bd {}", bufferdescr_id);
+            info!("len {}", self.bufferdescriptors.len());
+
+        }
+        assert!(bufferdescr_id < self.bufferdescriptors.len());
+        &self.bufferdescriptors[bufferdescr_id]
     }
 
     /// Will be called if a IN, OUT or SETUP transaction happened on endpoint 0
-    pub fn endpoint0_process_transaction(&'static mut self, last_transaction: Usb_stat_Get) {
-
+    pub fn endpoint0_process_transaction(&'static self, last_transaction: Usb_stat_Get) {
+        let ep0data = self.ep0data();
         let b = self.get_bufferdescriptor_by_statregister(last_transaction);
 
         let pid = b.control.pid_tok();
@@ -265,7 +269,7 @@ impl UsbDriver {
             0x0D => {
                 // SETUP transaction from host
                 // copy buffer content
-                self.ep0_setuppacket = unsafe { b.interpret_buf_as_setup_packet() };
+                ep0data.setuppacket = unsafe { b.interpret_buf_as_setup_packet() };
 
                 // give the buffer back to the USB-FS
                 b.control
@@ -275,7 +279,7 @@ impl UsbDriver {
                 // clear any leftover pending IN transactions
                 self.endpoint0_clear_all_pending_tx();
                 // first IN/Tx after Setup is always DATA1
-                self.ep0_next_tx_data01_state = usb::BufferDescriptor_control_data01::Data1;
+                ep0data.next_tx_data01_state = usb::BufferDescriptor_control_data01::Data1;
 
                 // actually "do" the setup request (e.g. GET_DESCRIPTOR)
                 self.endpoint0_process_setup_transaction().map_err(|e| {
@@ -287,7 +291,7 @@ impl UsbDriver {
                 // OUT/Rx transaction received from host
                 info!("usb control PID=OUT {}, r&t {:x}",
                       pid,
-                      self.ep0_setuppacket.request_and_type());
+                      ep0data.setuppacket.request_and_type());
                 // CC ifdef CDC_STATUS_INTERFACE
                 // CC   if (setup.wRequestAndType == 0x2021 /*CDC_SET_LINE_CODING*/) {
                 // CC     int i;
@@ -314,11 +318,11 @@ impl UsbDriver {
                 self.endpoint0_send_remaining_data();
 
                 // deferred: SET_ADDRESS
-                if self.ep0_setuppacket.request_and_type() == 0x0500 {
-                    self.ep0_setuppacket.clear_request();
+                if ep0data.setuppacket.request_and_type() == 0x0500 {
+                    ep0data.setuppacket.clear_request();
                     USB()
                         .addr
-                        .set_addr(self.ep0_setuppacket.wValue() as u8)
+                        .set_addr(ep0data.setuppacket.wValue() as u8)
                         .set_lsen(Usb_addr_lsen::RegularSpeed);
                 }
             }
@@ -331,29 +335,30 @@ impl UsbDriver {
         USB().ctl.ignoring_state().set_usbensofen(Usb_ctl_usbensofen::EnableUSBModule); // clear TXSUSPENDTOKENBUSY bit
     }
 
-    pub fn endpoint0_transmit(&mut self, buf: &'static [u8]) -> &'static [u8] {
+    pub fn endpoint0_transmit(&'static self, buf: &'static [u8]) -> &'static [u8] {
         let chunksize = self.endpoint0_transmit_ptr(buf.as_ptr(), buf.len());
         &buf[chunksize..]
     }
 
     /// Helper for some unsafe borrowing stuff
-    fn endpoint0_transmit_ptr(&mut self, buf: *const u8, len: usize) -> usize {
+    fn endpoint0_transmit_ptr(&'static self, buf: *const u8, len: usize) -> usize {
+        let ep0data = self.ep0data();
         let chunksize = cmp::min(EP0_SIZE, len);
         let bd =
-            self.get_bufferdescriptor_by_ep(usb::Ep::Ep0, usb::TxRx::Tx, self.ep0_next_tx_bank);
+            self.get_bufferdescriptor_by_ep(usb::Ep::Ep0, usb::TxRx::Tx, ep0data.next_tx_bank);
 
         bd.addr.ignoring_state().set_addr(buf as u32);
-        bd.control.ignoring_state().give_back(chunksize, self.ep0_next_tx_data01_state);
+        bd.control.ignoring_state().give_back(chunksize, ep0data.next_tx_data01_state);
 
-        self.ep0_next_tx_data01_state.toggle();
-        self.ep0_next_tx_bank.toggle();
+        ep0data.next_tx_data01_state.toggle();
+        ep0data.next_tx_bank.toggle();
 
         chunksize
     }
 
     /// The handlers of endpoint0 setup requests want to send data sometimes.
     /// They can do so by setting ep_tx0 to SendStatic or SendCustom.
-    fn endpoint0_execute_send_action(&mut self, action: Ep0TxAction) {
+    fn endpoint0_execute_send_action(&'static self, action: Ep0TxAction) {
         match action {
             Ep0TxAction::SendStatic(mut data) => {
                 data = self.endpoint0_transmit(data);
@@ -363,20 +368,20 @@ impl UsbDriver {
                 }
                 if data.len() > 0 {
                     // third chunk and following
-                    self.ep0_tx = Ep0Tx::StaticRemaining(data);
+                    self.ep0data().tx_state = Ep0Tx::StaticRemaining(data);
                 } else {
-                    self.ep0_tx = Ep0Tx::StaticFinishing;
+                    self.ep0data().tx_state = Ep0Tx::StaticFinishing;
                 }
             }
             Ep0TxAction::SendCustom { len } => {
                 // There will be no remaining data.
-                let buf = self.ep0_tx_buf.as_ptr();
+                let buf = self.ep0data().tx_buf.as_ptr();
                 self.endpoint0_transmit_ptr(buf, len as usize);
-                self.ep0_tx = Ep0Tx::CustomOwnedByBd0;
+                self.ep0data().tx_state = Ep0Tx::CustomOwnedByBd0;
             }
             Ep0TxAction::SendEmpty => {
                 self.endpoint0_transmit(&[]);
-                self.ep0_tx = Ep0Tx::StaticFinishing;
+                self.ep0data().tx_state = Ep0Tx::StaticFinishing;
             }
             _ => {}
         }
@@ -384,9 +389,9 @@ impl UsbDriver {
 
     /// Should be called whenever a IN transaction on Ep0 has been completed.
     /// This then copies the next chunk of data into the ep0 transmit buffer.
-    fn endpoint0_send_remaining_data(&mut self) {
+    fn endpoint0_send_remaining_data(&'static self) {
         // send remaining data, if any...
-        self.ep0_tx = match self.ep0_tx {
+        self.ep0data().tx_state = match self.ep0data().tx_state {
             // remaining slice of data that needs to be pushed into buffers step by step
             Ep0Tx::StaticRemaining(data) => {
                 let remaining = self.endpoint0_transmit(data);
@@ -406,8 +411,8 @@ impl UsbDriver {
         };
     }
 
-    pub fn endpoint0_clear_all_pending_tx(&mut self) {
-        self.ep0_tx = Ep0Tx::Nothing;
+    pub fn endpoint0_clear_all_pending_tx(&'static self) {
+        self.ep0data().tx_state = Ep0Tx::Nothing;
 
         self.get_bufferdescriptor_by_ep(usb::Ep::Ep0, usb::TxRx::Tx, usb::OddEven::Even)
             .control
@@ -430,8 +435,8 @@ impl UsbDriver {
             .set_ephshk(Usb_endpt_endpt_ephshk::Handshake);
     }
 
-    pub fn endpoint0_process_setup_transaction(&'static mut self) -> Result<(), &'static str> {
-        let action = match self.ep0_setuppacket.request_and_type() {
+    pub fn endpoint0_process_setup_transaction(&'static self) -> Result<(), &'static str> {
+        let action = match self.ep0data().setuppacket.request_and_type() {
             0x0500 => {
                 // SET_ADDRESS (do nothing here, defer until IN is completed)
                 // But make a IN transaction with a len of 0
@@ -443,13 +448,13 @@ impl UsbDriver {
             }
             0x0880 => {
                 // GET_CONFIGURATION
-                self.ep0_tx_buf[0] = self.usb_configuration;
+                self.ep0data().tx_buf[0] = self.state().usb_configuration;
                 Ep0TxAction::SendCustom { len: 1 }
             }
             0x0080 => {
                 // GET_STATUS (device)
-                self.ep0_tx_buf[0] = 0;
-                self.ep0_tx_buf[1] = 0;
+                self.ep0data().tx_buf[0] = 0;
+                self.ep0data().tx_buf[1] = 0;
                 Ep0TxAction::SendCustom { len: 2 }
             }
             0x0082 => {
@@ -482,11 +487,11 @@ impl UsbDriver {
     }
 
     /// Prepare everything for the chosen configuration
-    fn endpoint0_process_set_configuration(&mut self) -> Result<Ep0TxAction, &'static str> {
-        info!("usb setup set config {}", self.ep0_setuppacket.wValue());
+    fn endpoint0_process_set_configuration(&'static self) -> Result<Ep0TxAction, &'static str> {
+        info!("usb setup set config {}", self.ep0data().setuppacket.wValue());
 
-        self.usb_configuration = self.ep0_setuppacket.wValue() as u8;
-        for bd in generated::BufferDescriptors().iter().skip(4) {
+        self.state().usb_configuration = self.ep0data().setuppacket.wValue() as u8;
+        for bd in self.bufferdescriptors.iter().skip(4) {
             // WHY free the packets owned by the controller?
             if bd.control.own() == usb::BufferDescriptor_control_own::Controller {
                 match bd.swap_usb_packet(None) {
@@ -498,10 +503,10 @@ impl UsbDriver {
             }
         }
         self.fifos.clear_all(&self.pool);
-        for i in self.usb_rx_byte_count_data.iter_mut() {
+        for i in self.state().usb_rx_byte_count_data.iter_mut() {
             *i = 0;
         }
-        for i in self.tx_state.iter_mut() {
+        for i in self.state().tx_state.iter_mut() {
             match *i {
                 TxState::EvenFree |
                 TxState::NoneFreeEvenFirst => {
@@ -515,14 +520,14 @@ impl UsbDriver {
             }
         }
         self.pool.clear_priority_allocation_requests();
-        for (i, (epconf, endptreg)) in generated::EndpointconfigForRegisters()
+        for (i, (epconf, endptreg)) in self.endpointconfig_for_registers
             .iter()
             .zip(USB().endpt.iter())
             .enumerate()
             .skip(1) {
 
             endptreg.endpt.ignoring_state().set_raw(*epconf);
-            if i > generated::MAX_ENDPOINT_ADDR as usize {
+            if i > self.max_endpoint_addr as usize {
                 continue;
             }
 
@@ -567,25 +572,26 @@ impl UsbDriver {
         Ok((Ep0TxAction::SendEmpty))
     }
 
-    fn endpoint0_process_get_status_of_endpoint(&mut self) -> Result<Ep0TxAction, &'static str> {
-        let endpoint_nr = self.ep0_setuppacket.wIndex() as usize;
+    fn endpoint0_process_get_status_of_endpoint(&'static self) -> Result<Ep0TxAction, &'static str> {
+        let ep0data = self.ep0data();
+        let endpoint_nr = ep0data.setuppacket.wIndex() as usize;
         if endpoint_nr > 16 {
             return Err("illegal endpt");
         }
-        self.ep0_tx_buf[0] = match USB().endpt[endpoint_nr].endpt.epstall() {
+        ep0data.tx_buf[0] = match USB().endpt[endpoint_nr].endpt.epstall() {
             Usb_endpt_endpt_epstall::Stalled => 1,
             Usb_endpt_endpt_epstall::NotStalled => 0,
         };
-        self.ep0_tx_buf[1] = 0;
+        ep0data.tx_buf[1] = 0;
         Ok(Ep0TxAction::SendCustom { len: 2 })
     }
 
-    fn endpoint0_process_set_and_clear_feature_of_endpoint(&mut self,
+    fn endpoint0_process_set_and_clear_feature_of_endpoint(&'static self,
                                                            action: SetOrClear)
                                                            -> Result<Ep0TxAction, &'static str> {
         // there is only one feature available for any endpoint: ENDPOINT_HALT <=> wValue=0
-        let endpoint_nr = self.ep0_setuppacket.wIndex() as usize;
-        if endpoint_nr > 16 || self.ep0_setuppacket.wValue() != 0 {
+        let endpoint_nr = self.ep0data().setuppacket.wIndex() as usize;
+        if endpoint_nr > 16 || self.ep0data().setuppacket.wValue() != 0 {
             return Err("illegal endpt or unknown feature");
         }
 
@@ -600,14 +606,14 @@ impl UsbDriver {
         Ok((Ep0TxAction::SendEmpty))
     }
 
-    fn endpoint0_process_get_descriptor(&mut self) -> Result<Ep0TxAction, &'static str> {
-        let descr_type = (self.ep0_setuppacket.wValue() >> 8) as u8;
+    fn endpoint0_process_get_descriptor(&'static self) -> Result<Ep0TxAction, &'static str> {
+        let descr_type = (self.ep0data().setuppacket.wValue() >> 8) as u8;
         let mut data: &'static [u8] = match descr_type {
             1 => generated::DEVICEDESCRIPTOR,
             2 => generated::CONFIGDESCRIPTORTREE,
             3 => {
                 // String Descriptor
-                let index = self.ep0_setuppacket.wValue() as u8;
+                let index = self.ep0data().setuppacket.wValue() as u8;
                 generated::get_str(index)
             }
             _ => {
@@ -615,7 +621,7 @@ impl UsbDriver {
                 return Err("descriptor not found");
             }
         };
-        let requested_len = self.ep0_setuppacket.wLength() as usize;
+        let requested_len = self.ep0data().setuppacket.wLength() as usize;
         if data.len() > requested_len {
             data = &data[0..requested_len];
         }
@@ -623,23 +629,22 @@ impl UsbDriver {
     }
 
 
-    pub fn usb_reset(&self) {
+    pub fn usb_reset(&'static self) {
         // initialize BDT toggle bits
         USB().ctl.ignoring_state().set_oddrst(true);
-        let drv = generated::driver_ref().0;
-        drv.ep0_next_tx_bank = usb::OddEven::Even;
+        self.ep0data().next_tx_bank = usb::OddEven::Even;
 
         // set up buffers to receive Setup and OUT packets
         self.get_bufferdescriptor_by_ep(usb::Ep::Ep0, usb::TxRx::Rx, usb::OddEven::Even)
             .addr
-            .set_addr(&drv.ep0_rx0_buf as *const u8 as u32);
+            .set_addr(&self.ep0data().rx0_buf as *const u8 as u32);
         self.get_bufferdescriptor_by_ep(usb::Ep::Ep0, usb::TxRx::Rx, usb::OddEven::Even)
             .control
             .ignoring_state()
             .give_back(EP0_SIZE, usb::BufferDescriptor_control_data01::Data0);
         self.get_bufferdescriptor_by_ep(usb::Ep::Ep0, usb::TxRx::Rx, usb::OddEven::Odd)
             .addr
-            .set_addr(&drv.ep0_rx1_buf as *const u8 as u32);
+            .set_addr(&self.ep0data().rx1_buf as *const u8 as u32);
         self.get_bufferdescriptor_by_ep(usb::Ep::Ep0, usb::TxRx::Rx, usb::OddEven::Odd)
             .control
             .ignoring_state()
@@ -682,6 +687,175 @@ impl UsbDriver {
         // USB Enable Setting this bit causes the SIE to reset all of its ODD bits to the BDTs.
         // is this necessary? //*yes because we disabled usb above
         USB().ctl.ignoring_state().set_usbensofen(Usb_ctl_usbensofen::EnableUSBModule);
+    }
+
+    pub fn isr(&'static self) {
+        //   restart:
+        let mut status = USB().istat.get();
+        loop {
+            //   status = USB0_ISTAT;
+            status = USB().istat.get();
+
+            if status.softok() {
+                //     if (usb_configuration) { // *usb_configuration is the value set by host with SET_CONFIGURATION
+                //       t = usb_reboot_timer; // *I guess for restart triggered by firmware upload utility
+                //       if (t) {
+                //         usb_reboot_timer = --t;
+                //         if (!t) _reboot_Teensyduino_();
+                //       }
+                // #ifdef CDC_DATA_INTERFACE
+                //       t = usb_cdc_transmit_flush_timer; // *todo
+                //       if (t) {
+                //         usb_cdc_transmit_flush_timer = --t;
+                //         if (t == 0) usb_serial_flush_callback();
+                //       }
+                // #endif
+                //     }
+                USB().istat.ignoring_state().clear_softok();
+            }
+
+            if status.tokdne() {
+                // This bit is set when the current token being processed has completed. The processor must immediately
+                // read the STATUS (STAT) register to determine the EndPoint and BD used for this token. Clearing this bit
+                // (by writing a one) causes STAT to be cleared or the STAT holding register to be loaded into the STAT
+                // register.
+                let last_transaction = USB().stat.get();
+                if last_transaction.endp() == 0 {
+                    self.endpoint0_process_transaction(last_transaction);
+                } else {
+                    info!("unhandeled 34")
+                    //       bdt_t *b = stat2bufferdescriptor(stat);
+                    //       usb_packet_t *packet = (usb_packet_t *)((uint8_t *)(b->addr) - 8);
+                    // #if 0
+                    //       serial_print("ep:");
+                    //       serial_phex(endpoint);
+                    //       serial_print(", pid:");
+                    //       serial_phex(BDT_PID(b->desc));
+                    //       serial_print(((uint32_t)b & 8) ? ", odd" : ", even");
+                    //       serial_print(", count:");
+                    //       serial_phex(b->desc >> 16);
+                    //       serial_print("\n");
+                    // #endif
+                    //       endpoint--; // endpoint is index to zero-based arrays
+
+                    //       if (stat & 0x08) { // transmit
+                    //         usb_free(packet);
+                    //         packet = tx_first[endpoint];
+                    //         if (packet) {
+                    //           //serial_print("tx packet\n");
+                    //           tx_first[endpoint] = packet->next;
+                    //           b->addr = packet->buf;
+                    //           switch (tx_state[endpoint]) {
+                    //             case TX_STATE_BOTH_FREE_EVEN_FIRST:
+                    //             tx_state[endpoint] = TX_STATE_ODD_FREE;
+                    //             break;
+                    //             case TX_STATE_BOTH_FREE_ODD_FIRST:
+                    //             tx_state[endpoint] = TX_STATE_EVEN_FREE;
+                    //             break;
+                    //             case TX_STATE_EVEN_FREE:
+                    //             tx_state[endpoint] = TX_STATE_NONE_FREE_ODD_FIRST;
+                    //             break;
+                    //             case TX_STATE_ODD_FREE:
+                    //             tx_state[endpoint] = TX_STATE_NONE_FREE_EVEN_FIRST;
+                    //             break;
+                    //             default:
+                    //             break;
+                    //           }
+                    //           b->desc = BDT_DESC(packet->len,
+                    //             ((uint32_t)b & 8) ? DATA1 : DATA0);
+                    //         } else {
+                    //           //serial_print("tx no packet\n");
+                    //           switch (tx_state[endpoint]) {
+                    //             case TX_STATE_BOTH_FREE_EVEN_FIRST:
+                    //             case TX_STATE_BOTH_FREE_ODD_FIRST:
+                    //             break;
+                    //             case TX_STATE_EVEN_FREE:
+                    //             tx_state[endpoint] = TX_STATE_BOTH_FREE_EVEN_FIRST;
+                    //             break;
+                    //             case TX_STATE_ODD_FREE:
+                    //             tx_state[endpoint] = TX_STATE_BOTH_FREE_ODD_FIRST;
+                    //             break;
+                    //             default:
+                    //             tx_state[endpoint] = ((uint32_t)b & 8) ?
+                    //               TX_STATE_ODD_FREE : TX_STATE_EVEN_FREE;
+                    //             break;
+                    //           }
+                    //         }
+                    //       } else { // receive
+                    //         packet->len = b->desc >> 16;
+                    //         if (packet->len > 0) {
+                    //           packet->index = 0;
+                    //           packet->next = NULL;
+                    //           if (rx_first[endpoint] == NULL) {
+                    //             //serial_print("rx 1st, epidx=");
+                    //             //serial_phex(endpoint);
+                    //             //serial_print(", packet=");
+                    //             //serial_phex32((uint32_t)packet);
+                    //             //serial_print("\n");
+                    //             rx_first[endpoint] = packet;
+                    //           } else {
+                    //             //serial_print("rx Nth, epidx=");
+                    //             //serial_phex(endpoint);
+                    //             //serial_print(", packet=");
+                    //             //serial_phex32((uint32_t)packet);
+                    //             //serial_print("\n");
+                    //             rx_last[endpoint]->next = packet;
+                    //           }
+                    //           rx_last[endpoint] = packet;
+                    //           usb_rx_byte_count_data[endpoint] += packet->len;
+                    //           // TODO: implement a per-endpoint maximum # of allocated
+                    //           // packets, so a flood of incoming data on 1 endpoint
+                    //           // doesn't starve the others if the user isn't reading
+                    //           // it regularly
+                    //           packet = usb_malloc();
+                    //           if (packet) {
+                    //             b->addr = packet->buf;
+                    //             b->desc = BDT_DESC(64,
+                    //               ((uint32_t)b & 8) ? DATA1 : DATA0);
+                    //           } else {
+                    //             //serial_print("starving ");
+                    //             //serial_phex(endpoint + 1);
+                    //             b->desc = 0;
+                    //             usb_rx_memory_needed++;
+                    //           }
+                    //         } else {
+                    //           b->desc = BDT_DESC(64, ((uint32_t)b & 8) ? DATA1 : DATA0);
+                    //         }
+                    //       }
+                }
+                USB().istat.ignoring_state().clear_tokdne();
+            } else {
+                break;
+            }
+        } // end loop
+
+        if status.usbrst() {
+            info!("r");
+            self.usb_reset();
+            return;
+        }
+
+        if status.stall() {
+            info!("isr stall");
+            USB().endpt[0]
+                .endpt
+                .set_eprxen(Usb_endpt_endpt_eprxen::RxEnabled)
+                .set_eptxen(Usb_endpt_endpt_eptxen::TxEnabled)
+                .set_ephshk(Usb_endpt_endpt_ephshk::Handshake);
+            USB().istat.ignoring_state().clear_stall();
+        }
+
+        if status.error() {
+            let err = USB().errstat.get().raw();
+            USB().errstat.ignoring_state().clear_raw(err);
+            info!("isr err {:b}", err);
+            USB().istat.ignoring_state().clear_error();
+        }
+
+        if status.sleep() {
+            info!("isr sleep");
+            USB().istat.ignoring_state().clear_sleep();
+        }
     }
 }
 
@@ -737,172 +911,5 @@ impl FlashCommands {
 #[allow(dead_code)]
 #[no_mangle]
 pub unsafe extern "C" fn isr_usb() {
-
-    //   restart:
-    let mut status = USB().istat.get();
-    loop {
-        //   status = USB0_ISTAT;
-        status = USB().istat.get();
-
-        if status.softok() {
-            //     if (usb_configuration) { // *usb_configuration is the value set by host with SET_CONFIGURATION
-            //       t = usb_reboot_timer; // *I guess for restart triggered by firmware upload utility
-            //       if (t) {
-            //         usb_reboot_timer = --t;
-            //         if (!t) _reboot_Teensyduino_();
-            //       }
-            // #ifdef CDC_DATA_INTERFACE
-            //       t = usb_cdc_transmit_flush_timer; // *todo
-            //       if (t) {
-            //         usb_cdc_transmit_flush_timer = --t;
-            //         if (t == 0) usb_serial_flush_callback();
-            //       }
-            // #endif
-            //     }
-            USB().istat.ignoring_state().clear_softok();
-        }
-
-        if status.tokdne() {
-            // This bit is set when the current token being processed has completed. The processor must immediately
-            // read the STATUS (STAT) register to determine the EndPoint and BD used for this token. Clearing this bit
-            // (by writing a one) causes STAT to be cleared or the STAT holding register to be loaded into the STAT
-            // register.
-            let last_transaction = USB().stat.get();
-            if last_transaction.endp() == 0 {
-                generated::driver_ref().0.endpoint0_process_transaction(last_transaction);
-            } else {
-                info!("unhandeled 34")
-                //       bdt_t *b = stat2bufferdescriptor(stat);
-                //       usb_packet_t *packet = (usb_packet_t *)((uint8_t *)(b->addr) - 8);
-                // #if 0
-                //       serial_print("ep:");
-                //       serial_phex(endpoint);
-                //       serial_print(", pid:");
-                //       serial_phex(BDT_PID(b->desc));
-                //       serial_print(((uint32_t)b & 8) ? ", odd" : ", even");
-                //       serial_print(", count:");
-                //       serial_phex(b->desc >> 16);
-                //       serial_print("\n");
-                // #endif
-                //       endpoint--; // endpoint is index to zero-based arrays
-
-                //       if (stat & 0x08) { // transmit
-                //         usb_free(packet);
-                //         packet = tx_first[endpoint];
-                //         if (packet) {
-                //           //serial_print("tx packet\n");
-                //           tx_first[endpoint] = packet->next;
-                //           b->addr = packet->buf;
-                //           switch (tx_state[endpoint]) {
-                //             case TX_STATE_BOTH_FREE_EVEN_FIRST:
-                //             tx_state[endpoint] = TX_STATE_ODD_FREE;
-                //             break;
-                //             case TX_STATE_BOTH_FREE_ODD_FIRST:
-                //             tx_state[endpoint] = TX_STATE_EVEN_FREE;
-                //             break;
-                //             case TX_STATE_EVEN_FREE:
-                //             tx_state[endpoint] = TX_STATE_NONE_FREE_ODD_FIRST;
-                //             break;
-                //             case TX_STATE_ODD_FREE:
-                //             tx_state[endpoint] = TX_STATE_NONE_FREE_EVEN_FIRST;
-                //             break;
-                //             default:
-                //             break;
-                //           }
-                //           b->desc = BDT_DESC(packet->len,
-                //             ((uint32_t)b & 8) ? DATA1 : DATA0);
-                //         } else {
-                //           //serial_print("tx no packet\n");
-                //           switch (tx_state[endpoint]) {
-                //             case TX_STATE_BOTH_FREE_EVEN_FIRST:
-                //             case TX_STATE_BOTH_FREE_ODD_FIRST:
-                //             break;
-                //             case TX_STATE_EVEN_FREE:
-                //             tx_state[endpoint] = TX_STATE_BOTH_FREE_EVEN_FIRST;
-                //             break;
-                //             case TX_STATE_ODD_FREE:
-                //             tx_state[endpoint] = TX_STATE_BOTH_FREE_ODD_FIRST;
-                //             break;
-                //             default:
-                //             tx_state[endpoint] = ((uint32_t)b & 8) ?
-                //               TX_STATE_ODD_FREE : TX_STATE_EVEN_FREE;
-                //             break;
-                //           }
-                //         }
-                //       } else { // receive
-                //         packet->len = b->desc >> 16;
-                //         if (packet->len > 0) {
-                //           packet->index = 0;
-                //           packet->next = NULL;
-                //           if (rx_first[endpoint] == NULL) {
-                //             //serial_print("rx 1st, epidx=");
-                //             //serial_phex(endpoint);
-                //             //serial_print(", packet=");
-                //             //serial_phex32((uint32_t)packet);
-                //             //serial_print("\n");
-                //             rx_first[endpoint] = packet;
-                //           } else {
-                //             //serial_print("rx Nth, epidx=");
-                //             //serial_phex(endpoint);
-                //             //serial_print(", packet=");
-                //             //serial_phex32((uint32_t)packet);
-                //             //serial_print("\n");
-                //             rx_last[endpoint]->next = packet;
-                //           }
-                //           rx_last[endpoint] = packet;
-                //           usb_rx_byte_count_data[endpoint] += packet->len;
-                //           // TODO: implement a per-endpoint maximum # of allocated
-                //           // packets, so a flood of incoming data on 1 endpoint
-                //           // doesn't starve the others if the user isn't reading
-                //           // it regularly
-                //           packet = usb_malloc();
-                //           if (packet) {
-                //             b->addr = packet->buf;
-                //             b->desc = BDT_DESC(64,
-                //               ((uint32_t)b & 8) ? DATA1 : DATA0);
-                //           } else {
-                //             //serial_print("starving ");
-                //             //serial_phex(endpoint + 1);
-                //             b->desc = 0;
-                //             usb_rx_memory_needed++;
-                //           }
-                //         } else {
-                //           b->desc = BDT_DESC(64, ((uint32_t)b & 8) ? DATA1 : DATA0);
-                //         }
-                //       }
-            }
-            USB().istat.ignoring_state().clear_tokdne();
-        } else {
-            break;
-        }
-    } // end loop
-
-    if status.usbrst() {
-        info!("r");
-        generated::driver_ref().0.usb_reset();
-        return;
-    }
-
-    if status.stall() {
-        info!("isr stall");
-        USB().endpt[0]
-            .endpt
-            .set_eprxen(Usb_endpt_endpt_eprxen::RxEnabled)
-            .set_eptxen(Usb_endpt_endpt_eptxen::TxEnabled)
-            .set_ephshk(Usb_endpt_endpt_ephshk::Handshake);
-        USB().istat.ignoring_state().clear_stall();
-    }
-
-    if status.error() {
-        let err = USB().errstat.get().raw();
-        USB().errstat.ignoring_state().clear_raw(err);
-        info!("isr err {:b}", err);
-        USB().istat.ignoring_state().clear_error();
-    }
-
-    if status.sleep() {
-        info!("isr sleep");
-        USB().istat.ignoring_state().clear_sleep();
-    }
-
+    generated::usb_ref().isr();
 }

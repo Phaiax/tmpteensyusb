@@ -158,10 +158,6 @@
         }
     }
 
-    pub const MAX_ENDPOINT_ADDR : u8 = 4;
-
-    pub const NUM_BUFFERDESCRIPTORS : usize = 20;
-
     extern {
         #[no_mangle]
         #[link_name="_usbbufferdescriptors"]
@@ -170,8 +166,8 @@
 
     #[allow(non_snake_case, dead_code)]
     #[inline(always)]
-    pub fn BufferDescriptors() -> &'static mut [::usb::BufferDescriptor; 20] {
-        unsafe { &mut usbbufferdescriptors }
+    pub fn BufferDescriptors() -> &'static mut [::usb::BufferDescriptor] {
+        unsafe { &mut usbbufferdescriptors[..] }
     }
 
         
@@ -185,12 +181,36 @@
         unsafe { &mut ENDPOINTCONFIG_FOR_REGISTERS }
     }
 
-use usbdriver::{UsbDriver, UsbDriverRef, UsbDriverOption};
+    use usbmempool::{MemoryPool, MemoryPoolRef, UsbPacket};
 
-pub static mut USBDRIVER : UsbDriverOption = UsbDriverOption::none();
-pub fn driver_ref() -> UsbDriverRef {
-    unsafe { USBDRIVER.unwrap() }
-}
+    static mut POOL : Option<MemoryPool<[UsbPacket; 32]>> = None;
+    pub fn pool_ref() -> &'static MemoryPool<[UsbPacket; 32]> {
+        let r = unsafe { &mut POOL };
+        if r.is_none() {
+            *r = Some(MemoryPool::new());
+        }
+        &r.as_ref().unwrap()
+    }
+
+    use usbserial::UsbSerial;
+    use usbdriver::UsbDriver;
+
+    static mut USBDRIVER : Option<UsbSerial> = None;
+
+    pub fn usb_ref() -> &'static UsbSerial {
+        let r = unsafe { &mut USBDRIVER };
+        if r.is_none() {
+            *r = Some(UsbSerial::new(
+                UsbDriver::new(pool_ref(),
+                               DEVICEDESCRIPTOR,
+                               CONFIGDESCRIPTORTREE,
+                               get_str,
+                               BufferDescriptors(),
+                               ENDPOINTCONFIG_FOR_REGISTERS
+                                )));
+        }
+        &r.as_ref().unwrap()
+    }
 
 
 	use main as user_entry_function;
