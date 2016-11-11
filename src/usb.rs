@@ -38,46 +38,7 @@ use core::ptr;
 
 use usbmempool::{AllocatedUsbPacket, BufferPointerMagic};
 
-#[derive(Copy, Clone, Debug)]
-pub enum OddEven {
-    Even = 0b0000_0000,
-    Odd = 0b0000_0001,
-}
 
-impl OddEven {
-    pub fn toggle(&mut self) {
-        *self = match *self {
-            OddEven::Even => OddEven::Odd,
-            OddEven::Odd => OddEven::Even,
-        }
-    }
-}
-
-#[derive(Copy, Clone, Debug)]
-pub enum TxRx {
-    Rx = 0b0000_0000,
-    Tx = 0b0000_0010,
-}
-
-#[derive(Copy, Clone)]
-pub enum Ep {
-    Ep0 = 0b00_0000_00,
-    Ep1 = 0b00_0001_00,
-    Ep2 = 0b00_0010_00,
-    Ep3 = 0b00_0011_00,
-    Ep4 = 0b00_0100_00,
-    Ep5 = 0b00_0101_00,
-    Ep6 = 0b00_0110_00,
-    Ep7 = 0b00_0111_00,
-    Ep8 = 0b00_1000_00,
-    Ep9 = 0b00_1001_00,
-    Ep10 = 0b00_1010_00,
-    Ep11 = 0b00_1011_00,
-    Ep12 = 0b00_1100_00,
-    Ep13 = 0b00_1101_00,
-    Ep14 = 0b00_1110_00,
-    Ep15 = 0b00_1111_00,
-}
 
 ioregs!(BufferDescriptor = { //! An individual K20 Buffer Descriptor
     0 => reg32 control { //! Control attributes

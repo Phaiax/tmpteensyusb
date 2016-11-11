@@ -82,6 +82,7 @@ use core::ptr;
 
 use zinc::hal::cortex_m4::irq::NoInterrupts;
 use usbmempool::{UsbPacket, AllocatedUsbPacket, MemoryPoolTrait};
+use usbenum::EndpointWithDir;
 
 pub trait StoreNext {
     unsafe fn set_next(&mut self, next : AllocatedUsbPacket);
@@ -114,42 +115,6 @@ pub trait RetrieveNext {
 //        }
 //    );
 //}
-
-/// All endpoints
-#[derive(Clone, Copy)]
-pub enum Ep {
-    Rx1 = 0,
-    Tx1 = 1,
-    Rx2 = 2,
-    Tx2 = 3,
-    Rx3 = 4,
-    Tx3 = 5,
-    Rx4 = 6,
-    Tx4 = 7,
-    Rx5 = 8,
-    Tx5 = 9,
-    Rx6 = 10,
-    Tx6 = 11,
-    Rx7 = 12,
-    Tx7 = 13,
-    Rx8 = 14,
-    Tx8 = 15,
-    Rx9 = 16,
-    Tx9 = 17,
-    Rx10 = 18,
-    Tx10 = 19,
-    Rx11 = 20,
-    Tx11 = 21,
-    Rx12 = 22,
-    Tx12 = 23,
-    Rx13 = 24,
-    Tx13 = 25,
-    Rx14 = 26,
-    Tx14 = 27,
-    Rx15 = 28,
-    Tx15 = 29,
-}
-
 
 /// Pointers to the begin and end of the FIFO queue of an endpoint. Also tracks `BorrowState`.
 #[repr(packed)]
@@ -225,25 +190,25 @@ impl Fifos {
         }
     }
 
-    pub fn enqueue(&self, endpoint : Ep, packet : AllocatedUsbPacket) {
+    pub fn enqueue(&self, endpoint : EndpointWithDir, packet : AllocatedUsbPacket) {
         let _guard = NoInterrupts::new();
-        let fifo = unsafe { &mut *self.fifos[endpoint as usize].get() };
+        let fifo = unsafe { &mut *self.fifos[endpoint.as_fifo_1_index()].get() };
         fifo.enqueue(packet);
     }
 
-    pub fn dequeue(&self, endpoint : Ep) -> Option<AllocatedUsbPacket> {
+    pub fn dequeue(&self, endpoint : EndpointWithDir) -> Option<AllocatedUsbPacket> {
         let _guard = NoInterrupts::new();
-        let fifo = unsafe { &mut *self.fifos[endpoint as usize].get() };
+        let fifo = unsafe { &mut *self.fifos[endpoint.as_fifo_1_index()].get() };
         fifo.dequeue()
     }
 
-    pub fn len(&self, endpoint : Ep) -> usize {
+    pub fn len(&self, endpoint : EndpointWithDir) -> usize {
         let _guard = NoInterrupts::new();
-        let fifo = unsafe { &mut *self.fifos[endpoint as usize].get() };
+        let fifo = unsafe { &mut *self.fifos[endpoint.as_fifo_1_index()].get() };
         fifo.len()
     }
 
-    pub fn clear<T:MemoryPoolTrait>(&self, endpoint : Ep, pool : &T) {
+    pub fn clear<T:MemoryPoolTrait>(&self, endpoint : EndpointWithDir, pool : &T) {
         loop {
             match self.dequeue(endpoint) {
                 Some(p) => pool.free(p),

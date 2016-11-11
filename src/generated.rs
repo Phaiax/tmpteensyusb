@@ -212,6 +212,13 @@
         &r.as_ref().unwrap()
     }
 
+    #[allow(dead_code)]
+    #[no_mangle]
+    pub unsafe extern "C" fn isr_usb() {
+        usb_ref().isr();
+    }
+
+
 
 	use main as user_entry_function;
 

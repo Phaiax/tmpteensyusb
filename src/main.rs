@@ -13,6 +13,7 @@ pub mod usb;
 pub mod usbmempool;
 #[macro_use]
 pub mod usbmem;
+pub mod usbenum;
 pub mod usbdriver;
 pub mod usbserial;
 // mod test;
@@ -35,7 +36,8 @@ use zinc::drivers::chario::CharIO;
 use core::fmt::Write;
 
 use usbmempool::{MemoryPool, AllocatedUsbPacket, UsbPacket, MemoryPoolTrait};
-use usbmem::{Fifos, Ep};
+use usbmem::{Fifos};
+use usbenum::{EndpointWithDir, Direction};
 
 /// Wait the given number of SysTick ticks
 #[inline(never)]
@@ -140,7 +142,7 @@ fn test_fifo_2() {
   // Enqueue into FIFO. Use endpoint 3
 
   // max 1 helper for each endpoint at a time
-  let mut enq_helper_ep3 = pool.for_enqueuing(Ep::Tx3).unwrap();
+  let mut enq_helper_ep3 = pool.for_enqueuing(ep3tx).unwrap();
   let mut later = Later { packet: None };
   {
     let mut packet1 = enq_helper_ep3.enqueue().unwrap(); // allocate
@@ -160,7 +162,7 @@ fn test_fifo_2() {
   // Dequeue from FIFO. Use endpoint 3
 
   // max 1 helper for each endpoint at a time
-  let mut deq_helper_ep3 = pool.for_dequeuing(Ep::Tx3).unwrap();
+  let mut deq_helper_ep3 = pool.for_dequeuing(ep3tx).unwrap();
   {
     let packet1 = deq_helper_ep3.dequeue().unwrap(); // dequeue
     info!("Got {} bytes", packet1.len);
@@ -188,13 +190,19 @@ fn test_fifo() {
   let f = Fifos::new();
   let pool = pool_ref();
 
+  let ep3tx = EndpointWithDir::new(3, Direction::Tx);
+  let ep6tx = EndpointWithDir::new(6, Direction::Tx);
+  let ep8tx = EndpointWithDir::new(8, Direction::Tx);
+  let ep13tx = EndpointWithDir::new(13, Direction::Tx);
+  let ep15tx = EndpointWithDir::new(15, Direction::Tx);
+
   let mut p = pool.allocate().unwrap();
   p.buf_mut(30).iter_mut().enumerate().map(|(i,b)| *b = i as u8).count();
-  f.enqueue(Ep::Tx8, p);
+  f.enqueue(ep8tx, p);
 
-  let pr = f.dequeue(Ep::Tx8).unwrap();
+  let pr = f.dequeue(ep8tx).unwrap();
   assert!(pr.buf()[4] == 4);
-  assert!(f.dequeue(Ep::Tx8).is_none(), "Can dequeue from empty queue.");
+  assert!(f.dequeue(ep8tx).is_none(), "Can dequeue from empty queue.");
   pool.free(pr);
 
   // fill
@@ -202,8 +210,8 @@ fn test_fifo() {
     let mut p = pool.allocate().unwrap();
     assert_eq!(p.buf().len(), 0);
     assert_eq!(i, p.buf_mut(i as u16).iter().count());
-    f.enqueue(Ep::Tx3, p);
-    assert_eq!(f.len(Ep::Tx3), i + 1);
+    f.enqueue(ep3tx, p);
+    assert_eq!(f.len(ep3tx), i + 1);
   }
 
   assert_eq!(pool.available(), 16);
@@ -212,42 +220,42 @@ fn test_fifo() {
   for i in 16..32 {
     let mut p = pool.allocate().unwrap();
     p.set_index(i);
-    f.enqueue(Ep::Tx6, p);
+    f.enqueue(ep6tx, p);
   }
 
   assert_eq!(pool.available(), 0);
   assert!(pool.allocate().is_none(), "Can allocate more than 32 packets");
 
   // Test order
-  assert_eq!(f.len(Ep::Tx3), 16);
+  assert_eq!(f.len(ep3tx), 16);
   for i in 0..10 {
-    let re = f.dequeue(Ep::Tx3).expect("Can't dequeue from EP3");
+    let re = f.dequeue(ep3tx).expect("Can't dequeue from EP3");
     assert_eq!(re.buf().len(), i);
     re.recycle(&pool);
   }
   for i in 16..30 {
-    let re = f.dequeue(Ep::Tx6).expect("Cant dequeue from EP6");
+    let re = f.dequeue(ep6tx).expect("Cant dequeue from EP6");
     assert_eq!(re.index(), i);
     pool.free(re);
   }
 
   assert_eq!(pool.available(), 24);
 
-  assert_eq!(f.len(Ep::Tx6), 2);
-  assert_eq!(f.len(Ep::Tx3), 6);
-  f.clear(Ep::Tx3, &pool);
-  assert_eq!(f.len(Ep::Tx3), 0);
+  assert_eq!(f.len(ep6tx), 2);
+  assert_eq!(f.len(ep3tx), 6);
+  f.clear(ep3tx, &pool);
+  assert_eq!(f.len(ep3tx), 0);
   f.clear_all(&pool);
-  assert_eq!(f.len(Ep::Tx6), 0);
+  assert_eq!(f.len(ep6tx), 0);
   assert_eq!(pool.available(), 32);
 
   // test priority
   for i in 0..32 {
     let mut p = pool.allocate().unwrap();
     p.set_index(i);
-    f.enqueue(Ep::Tx15, p);
+    f.enqueue(ep15tx, p);
   }
-  assert_eq!(f.len(Ep::Tx15), 32);
+  assert_eq!(f.len(ep15tx), 32);
   assert_eq!(pool.available(), 0);
 
   assert!(pool.allocate().is_none(), "Can allocate more than 32 packets");
@@ -255,11 +263,11 @@ fn test_fifo() {
   pool.allocate_priority();
   pool.allocate_priority();
   unsafe { assert_eq!(SERVED_PRIO, 0);}
-  f.dequeue(Ep::Tx15).unwrap().recycle(&pool);
+  f.dequeue(ep15tx).unwrap().recycle(&pool);
   unsafe { assert_eq!(SERVED_PRIO, 1);}
-  f.dequeue(Ep::Tx15).unwrap().recycle(&pool);
+  f.dequeue(ep15tx).unwrap().recycle(&pool);
   unsafe { assert_eq!(SERVED_PRIO, 2);}
-  f.dequeue(Ep::Tx15).unwrap().recycle(&pool);
+  f.dequeue(ep15tx).unwrap().recycle(&pool);
   unsafe { assert_eq!(SERVED_PRIO, 2);}
   f.clear_all(&pool);
   assert_eq!(pool.available(), 30);

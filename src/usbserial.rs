@@ -1,5 +1,5 @@
 
-use usbdriver::UsbDriver;
+use usbdriver::{ UsbDriver, Action};
 
 pub struct UsbSerial {
     base : UsbDriver,
@@ -23,6 +23,20 @@ impl UsbSerial {
 
     pub fn isr(&'static self) {
         self.base.isr();
+        self.process();
+    }
+
+    fn process(&'static self) {
+        loop {
+            match self.base.action() {
+                Some(Action::Reset) => { self.reset(); }
+                None => { break; },
+            }
+        }
+    }
+
+    fn reset(&'static self) {
+
     }
 
 
