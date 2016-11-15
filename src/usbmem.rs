@@ -81,7 +81,7 @@ use core::mem;
 use core::ptr;
 
 use zinc::hal::cortex_m4::irq::NoInterrupts;
-use usbmempool::{UsbPacket, AllocatedUsbPacket, MemoryPoolTrait};
+use usbmempool::{UsbPacket, AllocatedUsbPacket, MemoryPoolTrait, HandlePriorityAllocation};
 use usbenum::EndpointWithDir;
 
 pub trait StoreNext {
@@ -208,21 +208,21 @@ impl Fifos {
         fifo.len()
     }
 
-    pub fn clear<T:MemoryPoolTrait>(&self, endpoint : EndpointWithDir, pool : &T) {
+    pub fn clear<T:MemoryPoolTrait, U:HandlePriorityAllocation>(&self, endpoint : EndpointWithDir, pool : &T, pra : & U) {
         loop {
             match self.dequeue(endpoint) {
-                Some(p) => pool.free(p),
+                Some(p) => pool.free(p, pra),
                 None => return
             }
         }
     }
 
-    pub fn clear_all<T:MemoryPoolTrait>(&self, pool : &T) {
+    pub fn clear_all<T:MemoryPoolTrait, U:HandlePriorityAllocation>(&self, pool : &T, pra : & U) {
         let _guard = NoInterrupts::new();
         for fifo in self.fifos.iter() {
             loop {
                 match unsafe { &mut *fifo.get() }.dequeue() {
-                    Some(p) => pool.free(p),
+                    Some(p) => pool.free(p, pra),
                     None => break
                 }
             }

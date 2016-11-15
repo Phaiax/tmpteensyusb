@@ -181,7 +181,7 @@
         unsafe { &mut ENDPOINTCONFIG_FOR_REGISTERS }
     }
 
-    use usbmempool::{MemoryPool, MemoryPoolRef, UsbPacket};
+    use usbmempool::{MemoryPool, UsbPacket};
 
     static mut POOL : Option<MemoryPool<[UsbPacket; 32]>> = None;
     pub fn pool_ref() -> &'static MemoryPool<[UsbPacket; 32]> {

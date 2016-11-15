@@ -80,6 +80,12 @@ pub struct UsbPacket {
     next : Option<AllocatedUsbPacket>,
 }
 
+impl UsbPacket {
+    pub fn capacity() -> usize {
+        64
+    }
+}
+
 impl fmt::Debug for UsbPacket {
     fn fmt(&self, f : &mut fmt::Formatter) -> fmt::Result {
         try!(writeln!(f, "[UsbPacket len: {}, index: {}, first byte: {}", self.len, self.index, self.buf[0]));
@@ -127,15 +133,18 @@ impl AllocatedUsbPacket {
         self.inner.len = newlen;
         &mut self.inner.buf[0..self.inner.len.to_usize()]
     }
+    pub fn len(&self) -> u16 {
+        self.inner.len
+    }
     pub fn index(&self) -> u16 {
         self.inner.index
     }
     pub fn set_index(&mut self, index : u16) {
         self.inner.index = index;
     }
-    pub fn recycle<T:MemoryPoolTrait>(self, pool : &T)
+    pub fn recycle<T:MemoryPoolTrait, U:HandlePriorityAllocation>(self, pool : &T, prio_alloc_handler : &U)
     {
-        pool.free(self);
+        pool.free(self, prio_alloc_handler)
     }
 }
 
@@ -185,31 +194,6 @@ impl Drop for AllocatedUsbPacket {
     }
 }
 
-/// This struct helps with the lazy initialization of a `'static` memory pool.
-/// It also prevents that memory pool from being deleted by panicing on drop.
-pub struct MemoryPoolOption<A : Array<Item=UsbPacket>>( Option< MemoryPool<A>> );
-
-impl<A : Array<Item=UsbPacket>> MemoryPoolOption<A> {
-    /// Const function to allow definition of `static mut POOL`. The POOL needs to be initialized.
-    pub const fn none() -> MemoryPoolOption<A> {
-        MemoryPoolOption(None)
-    }
-    /// Initialize self, that means transition from `None` to `Some`. Afterwards calls to `unwrap` are possible.
-    pub fn init(&mut self) {
-       match self.0 {
-           None => {*self = MemoryPoolOption(Some(MemoryPool::new()));}
-           Some(_) => { panic!(); }
-       }
-    }
-    /// Get a reference to the MemoryPool. Panics if not initialized.
-    pub fn unwrap(&'static mut self) -> MemoryPoolRef<A> {
-        match self.0 {
-            Some(ref mut p) => MemoryPoolRef(p),
-            None => { panic!("Call MemoryPoolOption::init() first"); },
-        }
-    }
-}
-
 
 /// Usb Packet memory is allocated from this memory pool.
 /// Max 32 packets are used since the bits of an u32 are used to remember allocations.
@@ -224,7 +208,10 @@ pub struct MemoryPool<A : Array> {
 }
 
 
-
+pub trait HandlePriorityAllocation {
+    /// Just now there are some new free packets
+    fn handle_priority_allocation(&self, packet : AllocatedUsbPacket) -> Option<AllocatedUsbPacket>;
+}
 
 impl<A : Array> MemoryPool<A> {
     /// Create new pool
@@ -249,34 +236,18 @@ impl<A:Array> Drop for MemoryPool<A> {
     }
 }
 
-/// This type wraps a `'static` memory pool. We must only allocate `'static`
-/// memory because we want the returned `AllocatedUsbPacket` to practically own the memory.
-///
-/// Also the only way to get this type is by using a `MemoryPoolOption`. That type
-/// can not be destroyed.
-pub struct MemoryPoolRef<A:'static + Array<Item=UsbPacket>>(&'static MemoryPool<A>);
-
 pub trait MemoryPoolTrait {
     /// Allocates the next free slot in the memory pool if not completely filled.
     fn allocate(&self) -> Option<AllocatedUsbPacket>;
     /// Allows reusing the slot behind pointer `item`. Calls `reset()` from trait `Reset` on `item`.
-    fn free(&self, item : AllocatedUsbPacket);
+    /// Make sure to
+    fn free<T:HandlePriorityAllocation>(&self, item : AllocatedUsbPacket, prio_alloc_handler : &T);
     /// It is assumed that a call to allocate() has failed and there are no free packets
-    /// at the moment. Call this to register prioritized interest in the next packet.
-    /// Implement
-    ///
-    /// ```
-    /// #[link_name="handle_priority_allocation"]
-    /// fn my_priority_allocation(p : AllocatedUsbPacket) -> Option<AllocatedUsbPacket> {}
-    /// ```
-    ///
-    /// Return the packet if you don't need it.
+    /// at the moment. Call this to register prioritized interest in the next free packet.
     fn allocate_priority(&self);
     fn clear_priority_allocation_requests(&self);
 }
 
-impl<A> MemoryPoolRef<A> where A:Array<Item = UsbPacket> {
-}
 
 impl<A> MemoryPoolTrait for &'static MemoryPool<A> where A:Array<Item = UsbPacket> {
 
@@ -297,14 +268,16 @@ impl<A> MemoryPoolTrait for &'static MemoryPool<A> where A:Array<Item = UsbPacke
         })
     }
     /// Allows reusing the slot behind pointer `item`. Calls `reset()` from trait `Reset` on `item`.
-    fn free(&self, mut item : AllocatedUsbPacket) {
+    fn free<T:HandlePriorityAllocation>(&self,
+                                        mut item : AllocatedUsbPacket,
+                                        prio_alloc_handler : &T) {
         {
             let guard = NoInterrupts::new();
             let priority_requests : &mut usize = unsafe { &mut *self.priority_requests.get() };
             if *priority_requests > 0 {
                 *priority_requests -= 1;
                 mem::drop(guard);
-                match unsafe { handle_priority_allocation(item) } {
+                match unsafe { prio_alloc_handler.handle_priority_allocation(item) } {
                     None => return,
                     Some(packet) => {
                         info!("Prio alloc did not need the packet.");
@@ -338,10 +311,6 @@ impl<A> MemoryPoolTrait for &'static MemoryPool<A> where A:Array<Item = UsbPacke
         let _guard = NoInterrupts::new();
         unsafe { *self.priority_requests.get() = 0; };
     }
-}
-
-extern {
-    fn handle_priority_allocation(p : AllocatedUsbPacket) -> Option<AllocatedUsbPacket>;
 }
 
 // #[link_name="handle_priority_allocation"]

@@ -23,6 +23,7 @@ pub use core as c;
 use core::option::Option::Some;
 use core::mem;
 use core::cmp;
+use core::cell::UnsafeCell;
 
 use zinc::hal::cortex_m4::systick;
 use zinc::hal::k20::{pin, watchdog};
@@ -35,7 +36,7 @@ use zinc::hal::uart::Parity;
 use zinc::drivers::chario::CharIO;
 use core::fmt::Write;
 
-use usbmempool::{MemoryPool, AllocatedUsbPacket, UsbPacket, MemoryPoolTrait};
+use usbmempool::{MemoryPool, AllocatedUsbPacket, UsbPacket, MemoryPoolTrait, HandlePriorityAllocation, BufferPointerMagic};
 use usbmem::{Fifos};
 use usbenum::{EndpointWithDir, Direction};
 
@@ -64,7 +65,27 @@ pub fn pool_ref() -> &'static MemoryPool<[UsbPacket; 32]> {
     &r.as_ref().unwrap()
 }
 
+struct PrioHandler(UnsafeCell<usize>);
 
+
+
+impl HandlePriorityAllocation for PrioHandler {
+    /// Just now there are some new free packets
+    fn handle_priority_allocation(&self, packet : AllocatedUsbPacket) -> Option<AllocatedUsbPacket> {
+        unsafe { packet.into_buf_ptr() };
+        unsafe { *self.0.get() += 1 };
+        None
+    }
+}
+
+static mut PRIOHANDLER : Option<PrioHandler> = None;
+fn prio_handler_ref() -> &'static PrioHandler {
+    let r = unsafe { &mut PRIOHANDLER };
+    if r.is_none() {
+        *r = Some(PrioHandler(UnsafeCell::new(0)));
+    }
+    &r.as_ref().unwrap()
+}
 
 pub fn main() {
   uart_logger::init( Uart::new(UARTPeripheral::UART0, 38400, 8, Parity::Disabled, 1,
@@ -98,7 +119,7 @@ pub fn main() {
      ///unsafe { POOL = MemoryPoolOption::none() }
      //info!("Killing");
      let recovered = unsafe { AllocatedUsbPacket::from_raw_buf_ptr(ptr) };
-     pool.free(recovered);
+     pool.free(recovered, prio_handler_ref());
   }
 
 
@@ -189,6 +210,7 @@ struct Later<'a> {
 fn test_fifo() {
   let f = Fifos::new();
   let pool = pool_ref();
+  let prio_handler = prio_handler_ref();
 
   let ep3tx = EndpointWithDir::new(3, Direction::Tx);
   let ep6tx = EndpointWithDir::new(6, Direction::Tx);
@@ -203,7 +225,7 @@ fn test_fifo() {
   let pr = f.dequeue(ep8tx).unwrap();
   assert!(pr.buf()[4] == 4);
   assert!(f.dequeue(ep8tx).is_none(), "Can dequeue from empty queue.");
-  pool.free(pr);
+  pool.free(pr, prio_handler);
 
   // fill
   for i in 0..16 {
@@ -231,21 +253,21 @@ fn test_fifo() {
   for i in 0..10 {
     let re = f.dequeue(ep3tx).expect("Can't dequeue from EP3");
     assert_eq!(re.buf().len(), i);
-    re.recycle(&pool);
+    re.recycle(&pool, prio_handler);
   }
   for i in 16..30 {
     let re = f.dequeue(ep6tx).expect("Cant dequeue from EP6");
     assert_eq!(re.index(), i);
-    pool.free(re);
+    pool.free(re, prio_handler);
   }
 
   assert_eq!(pool.available(), 24);
 
   assert_eq!(f.len(ep6tx), 2);
   assert_eq!(f.len(ep3tx), 6);
-  f.clear(ep3tx, &pool);
+  f.clear(ep3tx, &pool, prio_handler);
   assert_eq!(f.len(ep3tx), 0);
-  f.clear_all(&pool);
+  f.clear_all(&pool, prio_handler);
   assert_eq!(f.len(ep6tx), 0);
   assert_eq!(pool.available(), 32);
 
@@ -259,32 +281,21 @@ fn test_fifo() {
   assert_eq!(pool.available(), 0);
 
   assert!(pool.allocate().is_none(), "Can allocate more than 32 packets");
-  unsafe { assert_eq!(SERVED_PRIO, 0);}
+  unsafe { assert_eq!(*prio_handler.0.get(), 0);}
   pool.allocate_priority();
   pool.allocate_priority();
-  unsafe { assert_eq!(SERVED_PRIO, 0);}
-  f.dequeue(ep15tx).unwrap().recycle(&pool);
-  unsafe { assert_eq!(SERVED_PRIO, 1);}
-  f.dequeue(ep15tx).unwrap().recycle(&pool);
-  unsafe { assert_eq!(SERVED_PRIO, 2);}
-  f.dequeue(ep15tx).unwrap().recycle(&pool);
-  unsafe { assert_eq!(SERVED_PRIO, 2);}
-  f.clear_all(&pool);
+  unsafe { assert_eq!(*prio_handler.0.get(), 0);}
+  f.dequeue(ep15tx).unwrap().recycle(&pool, prio_handler);
+  unsafe { assert_eq!(*prio_handler.0.get(), 1);}
+  f.dequeue(ep15tx).unwrap().recycle(&pool, prio_handler);
+  unsafe { assert_eq!(*prio_handler.0.get(), 2);}
+  f.dequeue(ep15tx).unwrap().recycle(&pool, prio_handler);
+  unsafe { assert_eq!(*prio_handler.0.get(), 2);}
+  f.clear_all(&pool, prio_handler);
   assert_eq!(pool.available(), 30);
 
   info!(target: "usbmem", "FIFO test successfull");
 }
 
-static mut SERVED_PRIO : usize = 0;
 
-#[link_name="handle_priority_allocation"]
-#[no_mangle]
-fn handle_priority_allocation(p : AllocatedUsbPacket) -> Option<AllocatedUsbPacket> {
-    use usbmempool::BufferPointerMagic;
-    unsafe {
-      p.into_buf_ptr();
-      SERVED_PRIO += 1;
-    }
-    None
-}
 

@@ -1,5 +1,6 @@
 
 use usbdriver::{ UsbDriver, Action};
+use usbmempool::{AllocatedUsbPacket, HandlePriorityAllocation};
 
 pub struct UsbSerial {
     base : UsbDriver,
@@ -40,4 +41,11 @@ impl UsbSerial {
     }
 
 
+}
+
+impl<'a> HandlePriorityAllocation for &'a UsbSerial {
+    /// Just now there are some new free packets
+    fn handle_priority_allocation(&self, packet : AllocatedUsbPacket) -> Option<AllocatedUsbPacket> {
+        (&self.base).handle_priority_allocation(packet)
+    }
 }

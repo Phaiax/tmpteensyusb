@@ -6,7 +6,7 @@ pub use zinc::hal::k20::regs::Usb_stat_tx as Direction;
 
 
 
-/// Endpoint, direction (rx/tx) and bank (even/odd)
+/// Endpoint, direction (tx:1/rx) and bank (odd:1/even)
 ///
 /// Internal Format: `0b00ee_eedb`
 #[derive(Clone, Copy)]
@@ -28,9 +28,18 @@ impl EndpointWithDirAndBank {
     pub fn as_bufferdescriptorarray_index(self) -> usize {
         self.0 as usize
     }
+    /// Return ep index: Ep0=0 ... Ep15=15
+    pub fn ep_index(self) -> usize {
+        (self.0 >> 2) as usize
+    }
+    /// Bank
+    pub fn bank(self) -> Bank {
+        if self.0 & 1 == 1 { Bank::Odd }
+        else { Bank::Even }
+    }
 }
 
-/// Endpoint, direction (rx/tx)
+/// Endpoint, direction (tx/rx)
 ///
 /// Internal Format: 0b000e_eeed
 #[derive(Clone, Copy)]

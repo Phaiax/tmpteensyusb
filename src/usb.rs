@@ -156,6 +156,13 @@ impl BufferDescriptor_control_data01 {
             Data0 => Data1,
         };
     }
+    pub fn next(&self) -> BufferDescriptor_control_data01 {
+        use self::BufferDescriptor_control_data01::*;
+        match *self {
+            Data1 => Data0,
+            Data0 => Data1,
+        }
+    }
 }
 
 
