@@ -63,6 +63,10 @@ ioregs!(BufferDescriptor = { //! An individual K20 Buffer Descriptor
 
 // Add an override field for pid_tok over 5..2 of a BufferDescriptor. (Hand implement what ioregs would)
 impl BufferDescriptor_control {
+    /// Returns raw == 0
+    pub fn is_zero(&self) -> bool {
+        self.value.get() == 0x00
+    }
     /// Return the token for this buffer descriptor (overloaded with keep/ninc/dts/bdt_stall
     pub fn pid_tok(&self) -> u32 {
         BufferDescriptor_control_Get::new(self)
@@ -125,7 +129,7 @@ impl BufferDescriptor {
             None => 0,
         });
         if a != 0 {
-            Some(unsafe { AllocatedUsbPacket::from_raw_buf_ptr(a as *mut u8) })
+            Some(unsafe { AllocatedUsbPacket::from_raw_buf_ptr(a as *mut u8, self.control.bc() as u16) })
         } else {
             None
         }

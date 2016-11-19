@@ -19,6 +19,8 @@ path = "../zinc/ioreg"
 [dependencies.volatile_cell]
 path = "../zinc/volatile_cell"
 
+[dependencies.core_io]
+version = "0.1.*"
 
 [build-dependencies]
 platformtreeb = { path =  "../zinc/platformtreeb" }

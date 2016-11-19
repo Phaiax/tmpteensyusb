@@ -6,6 +6,7 @@
 #[macro_use] pub extern crate zinc;
 #[macro_use] #[no_link] extern crate ioreg;
 #[macro_use] extern crate volatile_cell;
+extern crate core_io;
 
 pub mod generated;
 //pub use generated2 as generated;
@@ -55,6 +56,26 @@ pub fn wait(ticks: u32) {
     }
   }
 }
+
+pub const ENDPOINTCONFIG_FOR_REGISTERS: &'static [Usb_endpt_endpt] = &[
+         Usb_endpt_endpt::from_raw(0x00),
+         Usb_endpt_endpt::from_raw(0x00),
+         Usb_endpt_endpt::from_raw(0x19),
+         Usb_endpt_endpt::from_raw(0x15),
+         Usb_endpt_endpt::from_raw(0x19),
+         Usb_endpt_endpt::from_raw(0x00),
+         Usb_endpt_endpt::from_raw(0x00),
+         Usb_endpt_endpt::from_raw(0x00),
+         Usb_endpt_endpt::from_raw(0x00),
+         Usb_endpt_endpt::from_raw(0x00),
+         Usb_endpt_endpt::from_raw(0x00),
+         Usb_endpt_endpt::from_raw(0x00),
+         Usb_endpt_endpt::from_raw(0x00),
+         Usb_endpt_endpt::from_raw(0x00),
+         Usb_endpt_endpt::from_raw(0x00),
+         Usb_endpt_endpt::from_raw(0x00),
+              ];
+
 
 static mut POOL : Option<MemoryPool<[UsbPacket; 32]>> = None;
 pub fn pool_ref() -> &'static MemoryPool<[UsbPacket; 32]> {
@@ -118,7 +139,7 @@ pub fn main() {
      let ptr = unsafe { p.into_buf_ptr() };
      ///unsafe { POOL = MemoryPoolOption::none() }
      //info!("Killing");
-     let recovered = unsafe { AllocatedUsbPacket::from_raw_buf_ptr(ptr) };
+     let recovered = unsafe { AllocatedUsbPacket::from_raw_buf_ptr(ptr, 2) };
      pool.free(recovered, prio_handler_ref());
   }
 

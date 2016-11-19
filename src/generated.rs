@@ -172,12 +172,27 @@
 
         
 
-    pub const ENDPOINTCONFIG_FOR_REGISTERS: &'static [u8] = &[
-		 0x00, 0x00, 0x19, 0x15, 0x19, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    pub const ENDPOINTCONFIG_FOR_REGISTERS: &'static [Usb_endpt_endpt] = &[
+		Usb_endpt_endpt::from_raw(0x00),
+		Usb_endpt_endpt::from_raw(0x00),
+		Usb_endpt_endpt::from_raw(0x19),
+		Usb_endpt_endpt::from_raw(0x15),
+		Usb_endpt_endpt::from_raw(0x19),
+		Usb_endpt_endpt::from_raw(0x00),
+		Usb_endpt_endpt::from_raw(0x00),
+		Usb_endpt_endpt::from_raw(0x00),
+		Usb_endpt_endpt::from_raw(0x00),
+		Usb_endpt_endpt::from_raw(0x00),
+		Usb_endpt_endpt::from_raw(0x00),
+		Usb_endpt_endpt::from_raw(0x00),
+		Usb_endpt_endpt::from_raw(0x00),
+		Usb_endpt_endpt::from_raw(0x00),
+		Usb_endpt_endpt::from_raw(0x00),
+		Usb_endpt_endpt::from_raw(0x00),
     ];
     #[allow(non_snake_case, dead_code)]
     #[inline(always)]
-    pub fn EndpointconfigForRegisters() -> &'static [u8] {
+    pub fn EndpointconfigForRegisters() -> &'static [Usb_endpt_endpt] {
         unsafe { &mut ENDPOINTCONFIG_FOR_REGISTERS }
     }
 

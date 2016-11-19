@@ -100,4 +100,8 @@ impl Endpoint {
     pub fn with_dir(self, d : Direction) -> EndpointWithDir {
         EndpointWithDir( (self.0 << 1) | (d as u8) )
     }
+    /// Return ep index: Ep0=0 ... Ep15=15
+    pub fn ep_index(self) -> usize {
+        (self.0) as usize
+    }
 }

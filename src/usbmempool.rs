@@ -39,7 +39,7 @@
 //!
 //! ```
 //! let ptr = unsafe { p.into_buf_ptr() };
-//! let recovered = unsafe { AllocatedUsbPacket::from_raw_buf_ptr(ptr) };
+//! let recovered = unsafe { AllocatedUsbPacket::from_raw_buf_ptr(ptr, len) };
 //! ```
 //!
 //! Never forget to recover the packet, otherwise you run out of memory.
@@ -63,7 +63,7 @@ pub trait Reset {
 /// This is Magic to allow a allocated buffer to be temporary owned by a buffer descriptor table entry
 pub trait BufferPointerMagic {
     unsafe fn into_buf_ptr(self) -> *mut u8;
-    unsafe fn from_raw_buf_ptr(ptr: *mut u8) -> AllocatedUsbPacket;
+    unsafe fn from_raw_buf_ptr(ptr: *mut u8, len : u16) -> AllocatedUsbPacket;
 }
 
 
@@ -180,10 +180,13 @@ impl BufferPointerMagic for AllocatedUsbPacket {
         mem::forget(self);
         ptr
     }
-    unsafe fn from_raw_buf_ptr(ptr : *mut u8) -> AllocatedUsbPacket {
+    unsafe fn from_raw_buf_ptr(ptr : *mut u8, len : u16) -> AllocatedUsbPacket {
         // offset between buffer and self must be zero
         let ptr : *mut UsbPacket = ptr as usize as *mut UsbPacket;
-        AllocatedUsbPacket { inner : (&mut *ptr) }
+        let a = AllocatedUsbPacket { inner : (&mut *ptr) };
+        assert!(len <= UsbPacket::capacity() as u16);
+        a.inner.len = len;
+        a
     }
 }
 
@@ -271,6 +274,7 @@ impl<A> MemoryPoolTrait for &'static MemoryPool<A> where A:Array<Item = UsbPacke
     fn free<T:HandlePriorityAllocation>(&self,
                                         mut item : AllocatedUsbPacket,
                                         prio_alloc_handler : &T) {
+        item.inner.reset();
         {
             let guard = NoInterrupts::new();
             let priority_requests : &mut usize = unsafe { &mut *self.priority_requests.get() };
@@ -294,7 +298,6 @@ impl<A> MemoryPoolTrait for &'static MemoryPool<A> where A:Array<Item = UsbPacke
             panic!();
         }
         let mask = 0x80000000 >> n;
-        item.inner.reset();
         let _guard = NoInterrupts::new();
         mem::forget(item);
         let available : &mut u32 = unsafe { &mut *self.available.get() };
