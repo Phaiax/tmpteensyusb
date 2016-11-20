@@ -25,6 +25,7 @@ use core::option::Option::Some;
 use core::mem;
 use core::cmp;
 use core::cell::UnsafeCell;
+use core::str::from_utf8;
 
 use zinc::hal::cortex_m4::systick;
 use zinc::hal::k20::{pin, watchdog};
@@ -126,7 +127,12 @@ pub fn main() {
   let pool = pool_ref(); // init
   generated::usb_ref(); // init
 
-
+    wait(2000);
+    write!(generated::usb_ref(), "Hoho");
+    {
+      use core_io::Write as IoWrite;
+      generated::usb_ref().flush();
+    }
   // let usb1 = USB().clone();
 
 
@@ -146,7 +152,8 @@ pub fn main() {
 
   //let usb = UsbDriver::new();
 
-    wait(7000);
+   // wait(7000);
+   // info!("{:?}",USB().endpt);
   // let usb2 = USB().clone();
   // info!("#######################################################################");
   // info!("{:?}", usb1);
@@ -155,11 +162,37 @@ pub fn main() {
   // info!("#######################################################################");
   // info!("{:?}", generated::BufferDescriptors());
 
+  let mut i = true;
+
   loop {
-    led1.set_high();
-    wait(500);
-    led1.set_low();
-    wait(500);
+
+    let mut readbuf = [0u8; 20];
+    {
+      use core_io::Read;
+      use core_io::Write as IoWrite;
+      loop {
+        if let Ok(num_bytes) = generated::usb_ref().read(&mut readbuf[..]) {
+          if num_bytes > 0 {
+            let in_str = from_utf8(&readbuf[0..num_bytes]).unwrap_or("");
+            info!("Got {}", in_str);
+
+            generated::usb_ref().write_all(&readbuf[0..num_bytes]);
+            generated::usb_ref().flush();
+
+            break;
+          }
+        }
+      }
+    }
+
+    if i {
+      led1.set_high();
+    } else {
+      led1.set_low();
+    }
+    i = !i;
+    //wait(500);
+    //wait(500);
   }
 
 }

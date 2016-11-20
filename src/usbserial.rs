@@ -97,6 +97,7 @@ impl UsbSerial {
                 Some(Action::HandleEp0RxTransactionSmall(ref buf)) => { self.handle_ep0_out(buf); }
                 Some(Action::HandleEp0RxTransaction) => { unimplemented!(); }
                 Some(Action::HandleEp0SetupPacket(ref setuppacket)) => { self.handle_ep0_setup(setuppacket); }
+                Some(Action::HandleEp0SetupPacketFinished) => { self.handle_ep0_setup_finished(); }
                 None => { break; },
             }
         }
@@ -104,6 +105,10 @@ impl UsbSerial {
 
     fn reset(&'static self) {
 
+    }
+
+    fn handle_ep0_setup_finished(&'static self) {
+        unsafe { (*self.setuppacket.get()) = None; }
     }
 
     fn handle_ep0_setup(&'static self, setuppacket : &SetupPacket) {
@@ -177,7 +182,7 @@ impl UsbSerial {
         loop {
             if let Some(mut rx_packet) = packet_option.take() {
                 if rx_packet.index() == rx_packet.len() || rx_packet.len() == 0 {
-                    rx_packet.recycle(&self.base.pool, &self);
+                    rx_packet.recycle(&self.base.pool, self);
                 } else {
                     return Some(rx_packet);
                 }
@@ -198,11 +203,11 @@ impl UsbSerial {
 
     pub fn discard_all_input(&self) {
         if let Some(rx_packet) = unsafe { (*self.rx_packet.get()).take() } {
-            rx_packet.recycle(&self.base.pool, &self);
+            rx_packet.recycle(&self.base.pool, self);
         }
         loop {
             if let Some(rx_packet) = self.base.fifos.dequeue(EndpointWithDir::new(CDC_RX_ENDPOINT, Direction::Rx)) {
-                rx_packet.recycle(&self.base.pool, &self);
+                rx_packet.recycle(&self.base.pool, self);
             } else {
                 break;
             }
@@ -211,7 +216,9 @@ impl UsbSerial {
     }
 
     fn flush_tx(&mut self) {
-        if let Some(tx_packet) = unsafe { (*self.tx_packet.get()).take() } {
+        if let Some(mut tx_packet) = unsafe { (*self.tx_packet.get()).take() } {
+            let ind = tx_packet.index();
+            tx_packet.set_len(ind);
             self.base.tx(CDC_TX_ENDPOINT.into(), tx_packet);
         }
     }
@@ -235,7 +242,7 @@ impl UsbSerial {
     }
 }
 
-impl<'a> HandlePriorityAllocation for &'a UsbSerial {
+impl HandlePriorityAllocation for UsbSerial {
     /// Just now there are some new free packets
     fn handle_priority_allocation(&self, packet : AllocatedUsbPacket) -> Option<AllocatedUsbPacket> {
         (&self.base).handle_priority_allocation(packet)
@@ -255,6 +262,13 @@ impl IoRead for UsbSerial {
                 packet.set_index((index + copy) as u16);
                 let mut buf = &mut buf[0..copy];
                 buf.copy_from_slice(&packet.buf()[index..index+copy]);
+
+                if copy != remaining {
+                    self.store_half_read_packet(packet);
+                } else {
+                    packet.recycle(&self.base.pool, self);
+                }
+
                 return Ok(copy);
             }
 

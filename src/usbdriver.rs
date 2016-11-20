@@ -29,7 +29,7 @@ pub enum Action {
     HandleEp0RxTransaction,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 enum TxState {
     BothFreeEvenFirst = 0,
     BothFreeOddFirst = 1,
@@ -329,14 +329,15 @@ impl UsbDriver {
                 return;
             }
         };
+        // info!("tx {:?} > {:?}", *tx_state, new_tx_state);
         *tx_state = new_tx_state;
 
         let next_data01 = match &bank {
             &Bank::Odd => usb::BufferDescriptor_control_data01::Data1,
             &Bank::Even => usb::BufferDescriptor_control_data01::Data0,
         };
-
         let packet_len = packet.len();
+        info!("pl {:?}", packet_len);
 
         let b = self.get_bufferdescriptor(endpoint.with_dir_bank(Direction::Tx, bank));
         b.swap_usb_packet(Some(packet));
@@ -382,7 +383,7 @@ impl UsbDriver {
             }
             0x01 | 0x02 => {
                 // OUT/Rx transaction received from host
-                info!("usb control PID=OUT {}, r&t {:x}",
+                info!("PID=OUT {}, r&t {:x}",
                       pid,
                       ep0data.setuppacket.request_and_type());
 
@@ -573,9 +574,11 @@ impl UsbDriver {
             }
             _ => {
                 self.state().enqueue(Action::HandleEp0SetupPacket(self.ep0data().setuppacket));
-                return Err("usb setup UNKNOWN");
+                return Ok(());
             }
         };
+
+        self.state().enqueue(Action::HandleEp0SetupPacketFinished);
 
         // CC  if (datalen > setup.wLength) datalen = setup.wLength;
 
@@ -827,8 +830,6 @@ impl UsbDriver {
                     self.endpoint0_process_transaction(last_transaction);
                 } else {
                     self.process_transaction(last_transaction);
-                    info!("unhandeled 34")
-
                 }
                 USB().istat.ignoring_state().clear_tokdne();
             } else {
@@ -893,7 +894,9 @@ impl UsbDriver {
 
         // CC      if (stat & 0x08) { // transmit
         if last_transaction.tx().eq(&Usb_stat_tx::Tx) {
+
             let tx_state : &mut TxState = &mut self.state().tx_state[endpoint.ep_index()];
+            //info!("ttx {:?}", *tx_state);
         // CC        usb_free(packet);
             b.swap_usb_packet(None).unwrap().recycle(&self.pool, &self);
         // CC        packet = tx_first[endpoint];
@@ -929,6 +932,7 @@ impl UsbDriver {
                     TxState::NoneFreeEvenFirst => TxState::NoneFreeEvenFirst,
                     TxState::NoneFreeOddFirst => TxState::NoneFreeOddFirst,
                 };
+                //info!(" (y) -> {:?}", *tx_state);
 
         // CC          b->desc = BDT_DESC(packet->len,
         // CC            ((uint32_t)b & 8 /* odd? */) ? DATA1 : DATA0);
@@ -960,7 +964,7 @@ impl UsbDriver {
                     TxState::BothFreeEvenFirst => TxState::BothFreeEvenFirst,
                     TxState::BothFreeOddFirst => TxState::BothFreeOddFirst,
                     TxState::EvenFree => TxState::BothFreeEvenFirst,
-                    TxState::OddFree => TxState::NoneFreeOddFirst,
+                    TxState::OddFree => TxState::BothFreeOddFirst,
                     TxState::NoneFreeEvenFirst | TxState::NoneFreeOddFirst => {
                         match endpoint.bank() {
                             Bank::Odd => TxState::OddFree,
@@ -968,6 +972,8 @@ impl UsbDriver {
                         }
                     },
                 };
+                //info!(" (n) -> {:?}", *tx_state);
+
         // CC        }
             }
         // CC      } else { // receive
@@ -1006,7 +1012,7 @@ impl UsbDriver {
                 if let Some(next) = self.pool.allocate() {
         // CC          if (packet) {
         // CC            b->addr = packet->buf;
-                    b.swap_usb_packet(Some(next)).unwrap();
+                    b.swap_usb_packet(Some(next));
         // CC            b->desc = BDT_DESC(64,
         // CC              ((uint32_t)b & 8) ? DATA1 : DATA0);
 

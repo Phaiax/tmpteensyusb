@@ -129,12 +129,15 @@ impl AllocatedUsbPacket {
         &self.inner.buf[0..self.inner.len.to_usize()]
     }
     pub fn buf_mut(&mut self, newlen : u16) -> &mut[u8] {
-        assert!(newlen < 64);
+        assert!(newlen <= UsbPacket::capacity() as u16);
         self.inner.len = newlen;
         &mut self.inner.buf[0..self.inner.len.to_usize()]
     }
     pub fn len(&self) -> u16 {
         self.inner.len
+    }
+    pub fn set_len(&mut self, len : u16) {
+        self.inner.len = len;
     }
     pub fn index(&self) -> u16 {
         self.inner.index
@@ -266,9 +269,11 @@ impl<A> MemoryPoolTrait for &'static MemoryPool<A> where A:Array<Item = UsbPacke
         }
         *available = *available & !(0x80000000 >> n);
         //info!("Allocate n {}, addr 0x{:x}", n, unsafe { pool.as_mut_ptr().offset(n as isize) as usize } );
-        Some(AllocatedUsbPacket {
+        let a = AllocatedUsbPacket {
             inner : unsafe { &mut * pool.as_mut_ptr().offset(n as isize) }
-        })
+        };
+        a.inner.reset();
+        Some(a)
     }
     /// Allows reusing the slot behind pointer `item`. Calls `reset()` from trait `Reset` on `item`.
     fn free<T:HandlePriorityAllocation>(&self,
