@@ -74,18 +74,35 @@ enum SetOrClear {
     Clear,
 }
 
-
+/// The part of the usb stack that manages usb configuration and
+/// endpoint 0 transfers, holds the memory pool and the FIFOs for all
+/// other endpoints.
+///
+/// Endpoint 0 transfers are used for querying the different descriptors,
+/// setting and clearing features and setting this device's usb address.
 pub struct UsbDriver {
-
+    /// Reference to the device descriptor. Set on construction.
     devicedescriptor : &'static [u8],
+    /// Reference to the configuration descriptor. Set on construction.
     configdescriptortree : &'static [u8],
+    /// Function pointer to a function that takes a string descriptor id
+    /// and returns a reference to that string. Set on construction.
     get_str : fn(u8) -> &'static [u8],
+    /// Maximum endpoint number used in the usb config descriptor.
     max_endpoint_addr : u8,
+    /// Reference to the (512-aligned) buffer descriptor array that is
+    /// also known to the USB-FS and is used to communicate buffer pointers
+    /// and buffer ownership to the USB-FS.
     bufferdescriptors : &'static mut [usb::BufferDescriptor],
+    /// Reference to an array of Usb_endpt_endpt that can be used 1:1 to
+    /// configure the registers in USB().endpt[]. The configuration (which
+    /// endpoint is rx/tx) must be the same as in configdescriptortree.
     endpointconfig_for_registers : &'static [Usb_endpt_endpt],
 
+    /// Some state variables, bundled into an UnsafeCell.
     state : UnsafeCell<UsbDriverState>,
 
+    /// Pool of AllocatedUsbPacket s.
     pub pool: &'static MemoryPool<[UsbPacket; 32]>,
     pub fifos: Fifos,
 
