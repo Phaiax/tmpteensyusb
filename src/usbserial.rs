@@ -94,8 +94,8 @@ impl UsbSerial {
         loop {
             match self.base.action() {
                 Some(Action::Reset) => { self.reset(); }
+                Some(Action::Configure(_)) => { }
                 Some(Action::HandleEp0RxTransactionSmall(ref buf)) => { self.handle_ep0_out(buf); }
-                Some(Action::HandleEp0RxTransaction) => { unimplemented!(); }
                 Some(Action::HandleEp0SetupPacket(ref setuppacket)) => { self.handle_ep0_setup(setuppacket); }
                 Some(Action::HandleEp0SetupPacketFinished) => { self.handle_ep0_setup_finished(); }
                 None => { break; },

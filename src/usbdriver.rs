@@ -55,6 +55,7 @@
 //! Also the interrupt routine must always find the driver struct.
 //!
 //! FIXME: Replace 'part' with 'layer'?
+//! FIXME #inline
 
 use zinc::hal::k20::regs::*;
 use usbmempool::{MemoryPool, UsbPacket, AllocatedUsbPacket, MemoryPoolTrait, HandlePriorityAllocation};
@@ -101,18 +102,12 @@ pub enum Action {
     /// Note: This Action can be sent anytime.
     HandleEp0SetupPacketFinished,
 
-    /// Associated received OUT transaction of the last setup packet
-    /// if the data length was 8 bytes or less.
+    /// Associated received OUT transaction of the last setup packet.
     /// Action: Do what the specific drivers specification says.
     HandleEp0RxTransactionSmall([u8;8]),
 
-    /// Associated received OUT transaction of the last setup packet
-    /// if the data length was more than 8 bytes.
-    /// Action: Do what the specific drivers specification says.
-    /// FIXME: currently unimplemented! Should allocate new packet.
-    HandleEp0RxTransaction,//(AllocatedUsbPacket)
-
-    /// FIXME implement
+    /// Device has been configured via SET_CONFIGURATION
+    /// Action: Driver should init configuration dependend internals if any.
     Configure(u8),
 }
 
@@ -120,15 +115,14 @@ pub enum Action {
 ///
 /// Each Endpoint and direction has two buffer slots
 /// that will be used alternating. These two Banks are called Odd and Even.
-/// FIXME: remove the numbers
 #[derive(Copy, Clone, Debug)]
-enum TxState {
-    BothFreeEvenFirst = 0,
-    BothFreeOddFirst = 1,
-    EvenFree = 2,
-    OddFree = 3,
-    NoneFreeEvenFirst = 4,
-    NoneFreeOddFirst = 5,
+enum TxBankOccupation {
+    BothFreeEvenFirst,
+    BothFreeOddFirst,
+    EvenFree,
+    OddFree,
+    NoneFreeEvenFirst,
+    NoneFreeOddFirst,
 }
 
 /// Endpoint 0 transmit state.
@@ -139,16 +133,13 @@ enum TxState {
 /// This state also keeps track if there is remaining static data to be sent.
 enum Ep0Tx {
     /// No data is currently send.
-    /// (FIXME: Or is there still some pointer to static data in the buffer descriptor?)
-    Nothing,
+    /// Or some static data is transmitted just now, but the buffer descriptors
+    /// already know about everything.
+    NothingOrFinishingStatic,
 
     /// Some static data is transmitted just now, and there is more static data
     /// to transmit.
     StaticRemaining(&'static [u8]),
-
-    /// Some static data is transmitted just now, but the buffer descriptors
-    /// already know about everything.
-    StaticFinishing,
 
     /// Data from the commonpart.ep0data.tx_buf is transmitted just now.
     /// We assume that we do never need to split the data into multiple chunks
@@ -177,8 +168,6 @@ pub enum Ep0TxAction {
 
 /// Used solely as argument for endpoint0_process_set_and_clear_feature_of_endpoint
 /// to distinguish between the two actions.
-///
-/// FIXME: Refactor away?
 enum SetOrClear {
     Set,
     Clear,
@@ -194,21 +183,13 @@ enum SetOrClear {
 /// It is intended that a more specific implementation encapsulates this
 /// struct.
 pub struct UsbDriver {
-    /// Reference to the device descriptor. Set on construction.
-    /// FIXME: Refactor all these &'static stuff out.
-    devicedescriptor : &'static [u8],
-    /// Reference to the configuration descriptor. Set on construction.
-    configdescriptortree : &'static [u8],
-    /// Function pointer to a function that takes a string descriptor id
-    /// and returns a reference to that string. Set on construction.
-    get_str : fn(u8) -> &'static [u8],
+    /// The descriptors and the shortened driver readable endpoint configuration.
+    descriptors_and_more : DescriptorsAndMore,
+
     /// Maximum endpoint number used in the usb config descriptor.
-    /// FIXME: document from where this information is calculated
+    /// This is calculated from bufferdescriptors.len().
     max_endpoint_addr : u8,
-    /// Reference to an array of Usb_endpt_endpt that will be copied 1:1 to
-    /// configure the registers in USB().endpt[]. The configuration (which
-    /// endpoint is rx/tx) must be the same as in configdescriptortree.
-    endpointconfig_for_registers : &'static [Usb_endpt_endpt],
+
     /// Reference to the (512-aligned) buffer descriptor array that is
     /// also known to the USB-FS and is used to communicate buffer pointers
     /// and buffer ownership to the USB-FS.
@@ -228,6 +209,24 @@ pub struct UsbDriver {
 
 }
 
+/// Usb configuration data
+///
+/// The descriptors and the shortened driver readable endpoint configuration.
+pub struct DescriptorsAndMore {
+    /// Reference to the device descriptor. Set on construction.
+    /// FIXME: Refactor all these &'static stuff out.
+    pub devicedescriptor : &'static [u8],
+    /// Reference to the configuration descriptor. Set on construction.
+    pub configdescriptortree : &'static [u8],
+    /// Function pointer to a function that takes a string descriptor id
+    /// and returns a reference to that string. Set on construction.
+    pub get_str : fn(u8) -> &'static [u8],
+    /// Reference to an array of Usb_endpt_endpt that will be copied 1:1 to
+    /// configure the registers in USB().endpt[]. The configuration (which
+    /// endpoint is rx/tx) must be the same as in configdescriptortree.
+    pub endpointconfig_for_registers : &'static [Usb_endpt_endpt],
+}
+
 /// A bunch of bundled state variables that are protected by a single mutex mechanism.
 /// FIXME: doc
 struct UsbDriverState {
@@ -243,8 +242,8 @@ struct UsbDriverState {
     /// FIXME: need a private fifo
     usb_rx_byte_count_data: [u16; 16], // [;NUM_ENDPOINTS]
     /// The state of the `Bank` for each endpoint. (Odd/even. Which is next?)
-    /// See `TxState` for more information.
-    tx_state: [TxState; 16],
+    /// See `TxBankOccupation` for more information.
+    tx_bank_occupation: [TxBankOccupation; 16],
 
     /// Action queue for communication with the specific part of the driver.
     /// This is actually a little FIFO.
@@ -312,11 +311,8 @@ impl UsbDriverState {
 impl UsbDriver {
     /// Instanciate. Should be done by lazy_static! or similar construct.
     pub fn new(pool: &'static MemoryPool<[UsbPacket; 32]>,
-               devicedescriptor : &'static [u8],
-               configdescriptortree : &'static [u8],
-               get_str : fn(u8) -> &'static [u8],
                bufferdescriptors : &'static mut [usb::BufferDescriptor],
-               endpointconfig_for_registers : &'static [Usb_endpt_endpt]) -> UsbDriver {
+               descriptors_and_more : DescriptorsAndMore) -> UsbDriver {
 
         // Each endpoint has 4 buffers (tx-even, tx-odd, rx-even, rx-odd).
         assert!(bufferdescriptors.len() % 4 == 0);
@@ -328,19 +324,17 @@ impl UsbDriver {
         }
 
         let common_part = UsbDriver {
-            devicedescriptor : devicedescriptor,
-            configdescriptortree : configdescriptortree,
-            get_str : get_str,
+            descriptors_and_more : descriptors_and_more,
+
             max_endpoint_addr : bufferdescriptors.len() as u8 / 4 - 1,
             bufferdescriptors : bufferdescriptors,
-            endpointconfig_for_registers : endpointconfig_for_registers,
 
             state : UnsafeCell::new(UsbDriverState {
                 usb_configuration: 0,
                 usb_reboot_timer: 0,
 
                 usb_rx_byte_count_data: [0u16; 16], // [;NUM_ENDPOINTS] TODO via associated const?
-                tx_state: [TxState::BothFreeEvenFirst; 16],
+                tx_bank_occupation: [TxBankOccupation::BothFreeEvenFirst; 16],
 
                 action : [None; 5],
                 action_enqueue : 0,
@@ -357,7 +351,7 @@ impl UsbDriver {
                 setuppacket: usb::SetupPacket::default(),
 
                 tx_buf: [0u8; 8],
-                tx_state: Ep0Tx::Nothing,
+                tx_state: Ep0Tx::NothingOrFinishingStatic,
                 next_tx_bank: Bank::Even,
                 next_tx_data01_state: usb::BufferDescriptor_control_data01::Data0,
             }),
@@ -448,20 +442,20 @@ impl UsbDriver {
     /// TThe interrupt routines will later move the buffer to the USB-FS.
     pub fn tx(&self, endpoint : Endpoint, packet : AllocatedUsbPacket) {
         let guard = NoInterrupts::new();
-        let tx_state : &mut TxState = &mut self.state().tx_state[endpoint.ep_index()];
+        let tx_bank_occupation : &mut TxBankOccupation = &mut self.state().tx_bank_occupation[endpoint.ep_index()];
 
         // Check where to put the packet.
-        let (new_tx_state, bank) = match *tx_state {
-            TxState::BothFreeEvenFirst => (TxState::OddFree, Bank::Even),
-            TxState::BothFreeOddFirst => (TxState::EvenFree, Bank::Odd),
-            TxState::EvenFree => (TxState::NoneFreeOddFirst, Bank::Even),
-            TxState::OddFree => (TxState::NoneFreeEvenFirst, Bank::Odd),
-            TxState::NoneFreeEvenFirst | TxState::NoneFreeOddFirst => {
+        let (new_tx_bank_occupation, bank) = match *tx_bank_occupation {
+            TxBankOccupation::BothFreeEvenFirst => (TxBankOccupation::OddFree, Bank::Even),
+            TxBankOccupation::BothFreeOddFirst => (TxBankOccupation::EvenFree, Bank::Odd),
+            TxBankOccupation::EvenFree => (TxBankOccupation::NoneFreeOddFirst, Bank::Even),
+            TxBankOccupation::OddFree => (TxBankOccupation::NoneFreeEvenFirst, Bank::Odd),
+            TxBankOccupation::NoneFreeEvenFirst | TxBankOccupation::NoneFreeOddFirst => {
                 self.fifos.enqueue(endpoint.with_dir(Direction::Tx), packet);
                 return;
             }
         };
-        *tx_state = new_tx_state;
+        *tx_bank_occupation = new_tx_bank_occupation;
 
         // FIXME: repetition
         let next_data01 = match &bank {
@@ -542,9 +536,6 @@ impl UsbDriver {
                     self.state().enqueue(Action::HandleEp0RxTransactionSmall(buf));
                 } else {
                     info!("large unhandled ep0 packets unsupported. len = {}", data_len);
-                    // FIXME: extend this to allocate a new packet and copy? the data?
-                    // or implement a mutex/ownership mechanism for the rx_buffers
-                    // self.state().enqueue(Action::HandleEp0RxTransaction);
                 }
 
                 // Give the buffer back.
@@ -613,7 +604,7 @@ impl UsbDriver {
                     // third chunk and following
                     self.ep0data().tx_state = Ep0Tx::StaticRemaining(data);
                 } else {
-                    self.ep0data().tx_state = Ep0Tx::StaticFinishing;
+                    self.ep0data().tx_state = Ep0Tx::NothingOrFinishingStatic;
                 }
             }
             Ep0TxAction::SendCustom { len } => {
@@ -624,7 +615,7 @@ impl UsbDriver {
             }
             Ep0TxAction::SendEmpty => {
                 self.endpoint0_transmit(&[]);
-                self.ep0data().tx_state = Ep0Tx::StaticFinishing;
+                self.ep0data().tx_state = Ep0Tx::NothingOrFinishingStatic;
             }
             _ => {}
         }
@@ -640,26 +631,23 @@ impl UsbDriver {
                 let remaining = self.endpoint0_transmit(data);
                 if remaining.len() == 0 {
                     // The last chunk has been copied into buffer,
-                    // but expect one (or two?? FIXME) more IN transaction(s).
-                    Ep0Tx::StaticFinishing
+                    // but expect one or two more IN-finished interrupts.
+                    Ep0Tx::NothingOrFinishingStatic
                 } else {
                     Ep0Tx::StaticRemaining(remaining)
                 }
             }
-            // The last bit of static data has arrived at the host
-            // (is that true? may the other of
-            // the odd/even buffers hold still data? in fact it doesnt matter.)
-            Ep0Tx::StaticFinishing => Ep0Tx::Nothing,
+            // The last bit of static data has arrived at the host (may be called twice)
+            Ep0Tx::NothingOrFinishingStatic => Ep0Tx::NothingOrFinishingStatic,
             // If custom data is sent, there will be no second part.
-            Ep0Tx::CustomOwnedByBd0 => Ep0Tx::Nothing,
-            _ => Ep0Tx::Nothing,
+            Ep0Tx::CustomOwnedByBd0 => Ep0Tx::NothingOrFinishingStatic,
         };
     }
 
     /// Clears all pending transations on endpoint 0.
     pub fn endpoint0_clear_all_pending_tx(&'static self) {
         // prevent remaining static data to be sent.
-        self.ep0data().tx_state = Ep0Tx::Nothing;
+        self.ep0data().tx_state = Ep0Tx::NothingOrFinishingStatic;
 
         self.get_bufferdescriptor(EndpointWithDirAndBank::new(0, Direction::Tx, Bank::Even))
             .control
@@ -751,10 +739,10 @@ impl UsbDriver {
     /// Initialize endpoints and clean up. This is a new beginning :)
     fn endpoint0_process_set_configuration(&'static self) -> Result<Ep0TxAction, &'static str> {
 
-        // FIXME
-        info!("usb setup set config {}", self.ep0data().setuppacket.wValue());
-
         self.state().usb_configuration = self.ep0data().setuppacket.wValue() as u8;
+
+        // Tell the specific part that we got a new configuration.
+        self.state().enqueue(Action::Configure(self.state().usb_configuration));
 
         // Free packets currently owned by the usb controller.
         for bd in self.bufferdescriptors.iter().skip(4) {
@@ -781,15 +769,15 @@ impl UsbDriver {
         // WHY: Why don't we reset to zero?
         //      Odd/Even is coupled with DATA0/1.
         //      So: is DATA0/1 stuff resetted on configuration?
-        for i in self.state().tx_state.iter_mut() {
+        for i in self.state().tx_bank_occupation.iter_mut() {
             match *i {
-                TxState::EvenFree |
-                TxState::NoneFreeEvenFirst => {
-                    *i = TxState::BothFreeEvenFirst;
+                TxBankOccupation::EvenFree |
+                TxBankOccupation::NoneFreeEvenFirst => {
+                    *i = TxBankOccupation::BothFreeEvenFirst;
                 }
-                TxState::OddFree |
-                TxState::BothFreeOddFirst => {
-                    *i = TxState::BothFreeOddFirst;
+                TxBankOccupation::OddFree |
+                TxBankOccupation::BothFreeOddFirst => {
+                    *i = TxBankOccupation::BothFreeOddFirst;
                 }
                 _ => {}
             }
@@ -801,13 +789,13 @@ impl UsbDriver {
         self.pool.clear_priority_allocation_requests();
 
         // Configure Endpoints 1-15. Set type and set buffers to Rx channels.
-        for (i, (epconf, endptreg)) in self.endpointconfig_for_registers
+        for (i, (epconf, endptreg)) in self.descriptors_and_more.endpointconfig_for_registers
             .iter()
             .zip(USB().endpt.iter())
             .enumerate()
             .skip(1) {
 
-            // Use the `self.endpointconfig_for_registers` preconfigured data to define
+            // Use the `endpointconfig_for_registers` preconfigured data to define
             // which endpoint is Tx/Rx/Both.
             // This was easier that parsing the descriptor.
             endptreg.endpt.ignoring_state().set_raw(epconf.raw());
@@ -921,13 +909,13 @@ impl UsbDriver {
     fn endpoint0_process_get_descriptor(&'static self) -> Result<Ep0TxAction, &'static str> {
         let descr_type = (self.ep0data().setuppacket.wValue() >> 8) as u8;
         let mut data: &'static [u8] = match descr_type {
-            1 => generated::DEVICEDESCRIPTOR,
-            2 => generated::CONFIGDESCRIPTORTREE,
+            1 => self.descriptors_and_more.devicedescriptor,
+            2 => self.descriptors_and_more.configdescriptortree,
             3 => {
                 // String Descriptors.
                 let index = self.ep0data().setuppacket.wValue() as u8;
                 // FIXME: use function pointer
-                generated::get_str(index)
+                (self.descriptors_and_more.get_str)(index)
             }
             _ => {
                 // not found
@@ -1119,7 +1107,7 @@ impl UsbDriver {
         if last_transaction.tx().eq(&Usb_stat_tx::Tx) {
             // => Tx/IN has finished.
 
-            let tx_state : &mut TxState = &mut self.state().tx_state[endpoint.ep_index()];
+            let tx_bank_occupation : &mut TxBankOccupation = &mut self.state().tx_bank_occupation[endpoint.ep_index()];
 
             // Free old transmitted AllocatedUsbPacket.
             b.swap_usb_packet(None).unwrap().recycle(&self.pool, &self);
@@ -1129,16 +1117,16 @@ impl UsbDriver {
 
             if let Some(packet) = next {
 
-                // Move Packet into BufferDescriptor and propagate tx_state ()
+                // Move Packet into BufferDescriptor and propagate tx_bank_occupation ()
                 let packet_len = packet.len();
                 b.swap_usb_packet(Some(packet));
-                *tx_state = match *tx_state {
-                    TxState::BothFreeEvenFirst => TxState::OddFree,
-                    TxState::BothFreeOddFirst =>  TxState::EvenFree,
-                    TxState::EvenFree => TxState::NoneFreeOddFirst,
-                    TxState::OddFree => TxState::NoneFreeEvenFirst,
-                    TxState::NoneFreeEvenFirst => TxState::NoneFreeEvenFirst,
-                    TxState::NoneFreeOddFirst => TxState::NoneFreeOddFirst,
+                *tx_bank_occupation = match *tx_bank_occupation {
+                    TxBankOccupation::BothFreeEvenFirst => TxBankOccupation::OddFree,
+                    TxBankOccupation::BothFreeOddFirst =>  TxBankOccupation::EvenFree,
+                    TxBankOccupation::EvenFree => TxBankOccupation::NoneFreeOddFirst,
+                    TxBankOccupation::OddFree => TxBankOccupation::NoneFreeEvenFirst,
+                    TxBankOccupation::NoneFreeEvenFirst => TxBankOccupation::NoneFreeEvenFirst,
+                    TxBankOccupation::NoneFreeOddFirst => TxBankOccupation::NoneFreeOddFirst,
                 };
 
                 // Give the buffer back to the USB-FS.
@@ -1148,15 +1136,15 @@ impl UsbDriver {
 
             } else {
                 // No packet in queue.
-                *tx_state = match *tx_state {
-                    TxState::BothFreeEvenFirst => TxState::BothFreeEvenFirst,
-                    TxState::BothFreeOddFirst => TxState::BothFreeOddFirst,
-                    TxState::EvenFree => TxState::BothFreeEvenFirst,
-                    TxState::OddFree => TxState::BothFreeOddFirst,
-                    TxState::NoneFreeEvenFirst | TxState::NoneFreeOddFirst => {
+                *tx_bank_occupation = match *tx_bank_occupation {
+                    TxBankOccupation::BothFreeEvenFirst => TxBankOccupation::BothFreeEvenFirst,
+                    TxBankOccupation::BothFreeOddFirst => TxBankOccupation::BothFreeOddFirst,
+                    TxBankOccupation::EvenFree => TxBankOccupation::BothFreeEvenFirst,
+                    TxBankOccupation::OddFree => TxBankOccupation::BothFreeOddFirst,
+                    TxBankOccupation::NoneFreeEvenFirst | TxBankOccupation::NoneFreeOddFirst => {
                         match endpoint.bank() {
-                            Bank::Odd => TxState::OddFree,
-                            Bank::Even => TxState::EvenFree,
+                            Bank::Odd => TxBankOccupation::OddFree,
+                            Bank::Even => TxBankOccupation::EvenFree,
                         }
                     },
                 };
@@ -1211,26 +1199,31 @@ impl<'a> HandlePriorityAllocation for &'a UsbDriver {
     /// Use them to fill all Rx endpoints that are active but do not own a packet.
     fn handle_priority_allocation(&self, packet : AllocatedUsbPacket) -> Option<AllocatedUsbPacket> {
         let guard = NoInterrupts::new();
-        for (i, epconf) in self.endpointconfig_for_registers.iter().enumerate().skip(1) {
+        for (i, epconf) in self.descriptors_and_more.endpointconfig_for_registers
+                               .iter().enumerate().skip(1) {
 
             if epconf.eprxen() == Usb_endpt_endpt_eprxen::RxEnabled {
 
-                let bd_even = self.get_bufferdescriptor(EndpointWithDirAndBank::new(i as u8, Direction::Rx, Bank::Even));
+                let bd_even = self.get_bufferdescriptor(
+                    EndpointWithDirAndBank::new(i as u8, Direction::Rx, Bank::Even));
                 if bd_even.control.is_zero() {
                     bd_even.swap_usb_packet(Some(packet)).unwrap();
                     // Give the buffer back to the USB-FS.
                     bd_even.control
                         .ignoring_state()
-                        .give_back(UsbPacket::capacity(), usb::BufferDescriptor_control_data01::Data0);
+                        .give_back(UsbPacket::capacity(),
+                                   usb::BufferDescriptor_control_data01::Data0);
                     return None;
                 }
 
-                let bd_odd = self.get_bufferdescriptor(EndpointWithDirAndBank::new(i as u8, Direction::Rx, Bank::Odd));
+                let bd_odd = self.get_bufferdescriptor(
+                    EndpointWithDirAndBank::new(i as u8, Direction::Rx, Bank::Odd));
                 if bd_odd.control.is_zero() {
                     bd_odd.swap_usb_packet(Some(packet)).unwrap();
                     bd_odd.control
                         .ignoring_state()
-                        .give_back(UsbPacket::capacity(), usb::BufferDescriptor_control_data01::Data1);
+                        .give_back(UsbPacket::capacity(),
+                                   usb::BufferDescriptor_control_data01::Data1);
                     return None;
                 }
             }

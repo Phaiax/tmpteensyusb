@@ -173,22 +173,22 @@
         
 
     pub const ENDPOINTCONFIG_FOR_REGISTERS: &'static [Usb_endpt_endpt] = &[
-		Usb_endpt_endpt::from_raw(0x00),
-		Usb_endpt_endpt::from_raw(0x00),
-		Usb_endpt_endpt::from_raw(0x19),
-		Usb_endpt_endpt::from_raw(0x15),
-		Usb_endpt_endpt::from_raw(0x19),
-		Usb_endpt_endpt::from_raw(0x00),
-		Usb_endpt_endpt::from_raw(0x00),
-		Usb_endpt_endpt::from_raw(0x00),
-		Usb_endpt_endpt::from_raw(0x00),
-		Usb_endpt_endpt::from_raw(0x00),
-		Usb_endpt_endpt::from_raw(0x00),
-		Usb_endpt_endpt::from_raw(0x00),
-		Usb_endpt_endpt::from_raw(0x00),
-		Usb_endpt_endpt::from_raw(0x00),
-		Usb_endpt_endpt::from_raw(0x00),
-		Usb_endpt_endpt::from_raw(0x00),
+		Usb_endpt_endpt::from_raw(0b00000000),
+		Usb_endpt_endpt::from_raw(0b00000000),
+		Usb_endpt_endpt::from_raw(0b00010101),
+		Usb_endpt_endpt::from_raw(0b00011001),
+		Usb_endpt_endpt::from_raw(0b00010101),
+		Usb_endpt_endpt::from_raw(0b00000000),
+		Usb_endpt_endpt::from_raw(0b00000000),
+		Usb_endpt_endpt::from_raw(0b00000000),
+		Usb_endpt_endpt::from_raw(0b00000000),
+		Usb_endpt_endpt::from_raw(0b00000000),
+		Usb_endpt_endpt::from_raw(0b00000000),
+		Usb_endpt_endpt::from_raw(0b00000000),
+		Usb_endpt_endpt::from_raw(0b00000000),
+		Usb_endpt_endpt::from_raw(0b00000000),
+		Usb_endpt_endpt::from_raw(0b00000000),
+		Usb_endpt_endpt::from_raw(0b00000000),
     ];
     #[allow(non_snake_case, dead_code)]
     #[inline(always)]
@@ -208,7 +208,7 @@
     }
 
     use usbserial::UsbSerial;
-    use usbdriver::UsbDriver;
+    use usbdriver::{UsbDriver, DescriptorsAndMore};
 
     static mut USBDRIVER : Option<UsbSerial> = None;
 
@@ -217,12 +217,14 @@
         if r.is_none() {
             *r = Some(UsbSerial::new(
                 UsbDriver::new(pool_ref(),
-                               DEVICEDESCRIPTOR,
-                               CONFIGDESCRIPTORTREE,
-                               get_str,
                                BufferDescriptors(),
-                               ENDPOINTCONFIG_FOR_REGISTERS
-                                )));
+                               DescriptorsAndMore {
+                                    devicedescriptor: DEVICEDESCRIPTOR,
+                                    configdescriptortree: CONFIGDESCRIPTORTREE,
+                                    get_str: get_str,
+                                    endpointconfig_for_registers: ENDPOINTCONFIG_FOR_REGISTERS,
+                               },
+                               )));
         }
         r.as_mut().unwrap()
     }
