@@ -173,22 +173,22 @@
         
 
     pub const ENDPOINTCONFIG_FOR_REGISTERS: &'static [Usb_endpt_endpt] = &[
-		Usb_endpt_endpt::from_raw(0b00000000),
-		Usb_endpt_endpt::from_raw(0b00000000),
-		Usb_endpt_endpt::from_raw(0b00010101),
-		Usb_endpt_endpt::from_raw(0b00011001),
-		Usb_endpt_endpt::from_raw(0b00010101),
-		Usb_endpt_endpt::from_raw(0b00000000),
-		Usb_endpt_endpt::from_raw(0b00000000),
-		Usb_endpt_endpt::from_raw(0b00000000),
-		Usb_endpt_endpt::from_raw(0b00000000),
-		Usb_endpt_endpt::from_raw(0b00000000),
-		Usb_endpt_endpt::from_raw(0b00000000),
-		Usb_endpt_endpt::from_raw(0b00000000),
-		Usb_endpt_endpt::from_raw(0b00000000),
-		Usb_endpt_endpt::from_raw(0b00000000),
-		Usb_endpt_endpt::from_raw(0b00000000),
-		Usb_endpt_endpt::from_raw(0b00000000),
+		Usb_endpt_endpt::from_raw(0x00),
+		Usb_endpt_endpt::from_raw(0x00),
+		Usb_endpt_endpt::from_raw(0x19),
+		Usb_endpt_endpt::from_raw(0x15),
+		Usb_endpt_endpt::from_raw(0x19),
+		Usb_endpt_endpt::from_raw(0x00),
+		Usb_endpt_endpt::from_raw(0x00),
+		Usb_endpt_endpt::from_raw(0x00),
+		Usb_endpt_endpt::from_raw(0x00),
+		Usb_endpt_endpt::from_raw(0x00),
+		Usb_endpt_endpt::from_raw(0x00),
+		Usb_endpt_endpt::from_raw(0x00),
+		Usb_endpt_endpt::from_raw(0x00),
+		Usb_endpt_endpt::from_raw(0x00),
+		Usb_endpt_endpt::from_raw(0x00),
+		Usb_endpt_endpt::from_raw(0x00),
     ];
     #[allow(non_snake_case, dead_code)]
     #[inline(always)]
