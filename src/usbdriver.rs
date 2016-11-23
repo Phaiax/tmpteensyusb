@@ -412,6 +412,16 @@ impl UsbDriver {
         common_part
     }
 
+    /// Returns the Data01-state that belongs to `bank`.
+    /// This relationship is fixed because USB protocol starts with DATA0,
+    /// and USB-FS starts with the Even bank. Then the two toogle synchronously.
+    fn bank_to_data01(bank : Bank) -> usb::BufferDescriptor_control_data01 {
+        match bank {
+            Bank::Odd => usb::BufferDescriptor_control_data01::Data1,
+            Bank::Even => usb::BufferDescriptor_control_data01::Data0,
+        }
+    }
+
     /// Open unsafe cell to endpoint 0 state.
     /// FIXME: Mutex or similar
     fn ep0data(&'static self) -> &'static mut Endpoint0Data {
@@ -457,11 +467,7 @@ impl UsbDriver {
         };
         *tx_bank_occupation = new_tx_bank_occupation;
 
-        // FIXME: repetition
-        let next_data01 = match &bank {
-            &Bank::Odd => usb::BufferDescriptor_control_data01::Data1,
-            &Bank::Even => usb::BufferDescriptor_control_data01::Data0,
-        };
+        let next_data01 = Self::bank_to_data01(bank);
 
         let packet_len = packet.len();
 
@@ -793,58 +799,21 @@ impl UsbDriver {
             .iter()
             .zip(USB().endpt.iter())
             .enumerate()
-            .skip(1) {
+            .skip(1)
+            .take(self.max_endpoint_addr as usize) {
 
             // Use the `endpointconfig_for_registers` preconfigured data to define
             // which endpoint is Tx/Rx/Both.
             // This was easier that parsing the descriptor.
             endptreg.endpt.ignoring_state().set_raw(epconf.raw());
 
-            // FIXME: add to `for` as e.g. .take()
-            if i > self.max_endpoint_addr as usize {
-                continue;
-            }
-
             // Rx EndPoints need packets in both banks (even and odd) that are ready for
             // receiving data.
             if endptreg.endpt.eprxen() == Usb_endpt_endpt_eprxen::RxEnabled {
-                // FIXME: repetition.
-                // Even
-                let bd = self.get_bufferdescriptor(EndpointWithDirAndBank::new(i as u8, Direction::Rx, Bank::Even));
-                match self.pool.allocate() {
-                    Some(p) => {
-                        // Move packet ownership to buffer descriptor.
-                        bd.swap_usb_packet(Some(p));
-                        bd.control
-                            .ignoring_state()
-                            .give_back(UsbPacket::capacity(), usb::BufferDescriptor_control_data01::Data0);
-                    }
-                    None => {
-                        // No more free packets. Reserve the next free'd packet.
-                        // Because of this it is necessary to provide a reference to
-                        // this struct during recycling of packets.
-                        bd.control.ignoring_state().zero_all();
-                        self.pool.allocate_priority();
-                    }
-                }
-                // Odd
-                let bd = self.get_bufferdescriptor(EndpointWithDirAndBank::new(i as u8, Direction::Rx, Bank::Odd));
-                match self.pool.allocate() {
-                    Some(p) => {
-                        // Move packet ownership to buffer descriptor.
-                        bd.swap_usb_packet(Some(p));
-                        bd.control
-                            .ignoring_state()
-                            .give_back(UsbPacket::capacity(), usb::BufferDescriptor_control_data01::Data1);
-                    }
-                    None => {
-                        // No more free packets. Reserve the next free'd packet.
-                        // Because of this it is necessary to provide a reference to
-                        // this struct during recycling of packets.
-                        bd.control.ignoring_state().zero_all();
-                        self.pool.allocate_priority();
-                    }
-                }
+                self.setup_rx_endpoint_or_do_priority_allocation(
+                    EndpointWithDirAndBank::new(i as u8, Direction::Rx, Bank::Odd));
+                self.setup_rx_endpoint_or_do_priority_allocation(
+                    EndpointWithDirAndBank::new(i as u8, Direction::Rx, Bank::Even));
             }
 
             // Tx endpoints only own packets if they send data.
@@ -862,6 +831,28 @@ impl UsbDriver {
 
         // Empty IN transaction on required as ACQ.
         Ok((Ep0TxAction::SendEmpty))
+    }
+
+    /// Allocates new packet for `ep`.
+    /// Assumes `ep` to be a Rx endpoint and assumes that `ep` does not contain a packet.
+    fn setup_rx_endpoint_or_do_priority_allocation(&'static self, ep : EndpointWithDirAndBank) {
+        let bd = self.get_bufferdescriptor(ep);
+        match self.pool.allocate() {
+            Some(p) => {
+                // Move packet ownership to buffer descriptor.
+                bd.swap_usb_packet(Some(p));
+                bd.control
+                    .ignoring_state()
+                    .give_back(UsbPacket::capacity(), usb::BufferDescriptor_control_data01::Data0);
+            }
+            None => {
+                // No more free packets. Reserve the next free'd packet.
+                // Because of this it is necessary to provide a reference to
+                // this struct during recycling of packets.
+                bd.control.ignoring_state().zero_all();
+                self.pool.allocate_priority();
+            }
+        }
     }
 
     /// Handle GET_STATUS of endpoint.
@@ -1095,11 +1086,7 @@ impl UsbDriver {
         let ep0data = self.ep0data();
         let endpoint : EndpointWithDirAndBank = last_transaction.into();
 
-        // FIXME: refactor
-        let next_data01 = match endpoint.bank() {
-            Bank::Odd => usb::BufferDescriptor_control_data01::Data1,
-            Bank::Even => usb::BufferDescriptor_control_data01::Data0,
-        };
+        let next_data01 = Self::bank_to_data01(endpoint.bank());
 
         let b = self.get_bufferdescriptor(endpoint);
 
