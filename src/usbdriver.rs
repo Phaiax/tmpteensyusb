@@ -54,6 +54,28 @@
 //! pointers that point to some data buffers that live within the common part (pool).
 //! Also the interrupt routine must always find the driver struct.
 //!
+//!
+//! # ISR safety
+//!
+//! An ISR may occur at any time, even when the driver handles a non-isr user request
+//! at the same time. We must make sure there is no concurrent access and no data races.
+//! The problem is that the user holds a `&'static mut` reference. That means rusts
+//! ownership/borrowing rules do not hold. The isr routine holds a second `&'static mut`
+//! reference at the same time.
+//!
+//! So as an overview, here is a call graph:
+//!
+//! ```
+//!
+//! UsbSerial::isr()
+//!     UsbDriver::isr()
+//!
+//!
+//!
+//!
+//!
+//! ```
+//!
 //! FIXME: Replace 'part' with 'layer'?
 //! FIXME #inline
 
@@ -843,11 +865,12 @@ impl UsbDriver {
                 bd.swap_usb_packet(Some(p));
                 bd.control
                     .ignoring_state()
-                    .give_back(UsbPacket::capacity(), usb::BufferDescriptor_control_data01::Data0);
+                    .give_back(UsbPacket::capacity(),
+                               usb::BufferDescriptor_control_data01::Data0);
             }
             None => {
                 // No more free packets. Reserve the next free'd packet.
-                // Because of this it is necessary to provide a reference to
+                // Because of this functionality it is necessary to provide a reference to
                 // this struct during recycling of packets.
                 bd.control.ignoring_state().zero_all();
                 self.pool.allocate_priority();
@@ -905,7 +928,6 @@ impl UsbDriver {
             3 => {
                 // String Descriptors.
                 let index = self.ep0data().setuppacket.wValue() as u8;
-                // FIXME: use function pointer
                 (self.descriptors_and_more.get_str)(index)
             }
             _ => {
